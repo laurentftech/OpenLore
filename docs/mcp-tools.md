@@ -121,7 +121,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `orient` | **Single entry point for any new task.** Given a natural-language task description, returns in one call: relevant functions, source files, spec domains, call neighbourhoods, insertion-point candidates, and matching spec sections. Start here. | Yes (+ embedding) |
+| `orient` | **Single entry point for any new task.** Given a natural-language task description, returns in one call: relevant functions, source files, spec domains, call neighbourhoods, insertion-point candidates, matching spec sections, and `suggestedTools` — a ranked list of next tools to call derived from task context (hub presence, spec domains, keywords). Start here. | Yes (+ embedding) |
 | `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with similarity score, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `suggest_insertion_points` | Semantic search over the vector index to find the best existing functions to extend or hook into when implementing a new feature. Returns ranked candidates with role and strategy. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `get_subgraph` | Depth-limited subgraph centred on a function. Direction: `downstream` (what it calls), `upstream` (who calls it), or `both`. Output as JSON or Mermaid diagram. | Yes |
@@ -189,6 +189,8 @@ directory  string   Absolute path to the project directory
 task       string   Natural-language description of the task, e.g. "add rate limiting to the API"
 limit      number   Max relevant functions to return (default: 5, max: 20)
 ```
+
+Response includes `suggestedTools: string[]` — a ranked list of spec-gen tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 45.
 
 **`analyze_codebase`**
 ```
@@ -444,6 +446,9 @@ dryRun     boolean   Preview changes without writing files (default: false)
    #   - matching spec sections AND matching ADRs (domain "decisions")
    #   - active decisions touching the task's domains (pendingDecisions)
    #   - approved decisions always surfaced — must sync before committing
+   #   - suggestedTools: ranked list of next tools to call based on task context
+   #     (hub presence, spec domains, task keywords) — portable discovery for
+   #     clients without Tool Search (Cline, Cursor, OpenCode)
 2. get_spec({ directory, domain: "..." })             # read full spec before writing code
 3. check_spec_drift({ directory })                    # verify after implementation
 ```

@@ -201,12 +201,22 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   if (await fileExists(hookPath)) {
     existingContent = await readFile(hookPath, 'utf-8');
     if (existingContent.includes(HOOK_MARKER)) {
-      logger.success('Pre-commit hook already installed.');
+      // Still clean up legacy spec-gen block if present
+      const cleaned = existingContent.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '');
+      if (cleaned !== existingContent) {
+        await writeFile(hookPath, cleaned, 'utf-8');
+        logger.discovery('Removed legacy spec-gen-decisions-hook block.');
+      } else {
+        logger.success('Pre-commit hook already installed.');
+      }
       return;
     }
     logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
-    // Strip a trailing `exit 0` so our block is not unreachable.
-    const stripped = existingContent.trimEnd().replace(/\n*\nexit 0\s*$/, '');
+    // Strip legacy spec-gen block and trailing `exit 0` so our block is not unreachable.
+    const stripped = existingContent
+      .replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
+      .trimEnd()
+      .replace(/\n*\nexit 0\s*$/, '');
     await writeFile(hookPath, stripped + '\n\n' + HOOK_CONTENT, 'utf-8');
   } else {
     await writeFile(hookPath, '#!/bin/sh\n\n' + HOOK_CONTENT, 'utf-8');
@@ -267,6 +277,7 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
 
   const newContent = content
     .replace(/\n*# openlore-decisions-hook[\s\S]*?# end-openlore-decisions-hook\n*/g, '')
+    .replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
     .trim();
 
   if (!newContent || newContent === '#!/bin/sh') {
