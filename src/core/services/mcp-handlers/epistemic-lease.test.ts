@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createTracker, updateTracker, injectFreshness, getSourceRoots } from './epistemic-lease.js';
+import { createTracker, updateTracker, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
 import type { EpistemicTracker } from './epistemic-lease.js';
 
 // ============================================================================
@@ -619,5 +619,158 @@ describe('updateTracker — V3.1 cross-module trajectory', () => {
     // One more call — oldest entry drops off
     updateTracker(t, 'get_function_body', '/fake/repo', 'src/auth/y.ts');
     expect(t.moduleAccessWindow).toHaveLength(15);
+  });
+});
+
+// ============================================================================
+// Panic — score accumulation and level transitions
+// ============================================================================
+
+describe('panic — score and level via updateTracker', () => {
+  it('starts at panicScore 0, panicLevel 0', () => {
+    const t = freshTracker();
+    expect(t.panicScore).toBe(0);
+    expect(t.panicLevel).toBe(0);
+  });
+
+  it('panicScore increases with oscillation', () => {
+    const t = freshTracker();
+    // Build A→B→A→B oscillation (bigram repetition) driving oscillation score up
+    for (let i = 0; i < 15; i++) {
+      const mod = i % 2 === 0 ? 'auth' : 'billing';
+      updateTracker(t, 'search_code', '/fake/repo', `src/${mod}/x.ts`);
+    }
+    expect(t.panicScore).toBeGreaterThan(0);
+  });
+
+  it('panicLevel rises to 1 when panicScore >= 30', () => {
+    const t = freshTracker();
+    t.panicScore = 29;
+    // One more call with high density should push it over 30
+    t.moduleAccessWindow = ['auth','billing','auth','billing','auth','billing','auth','billing',
+      'auth','billing','auth','billing','auth','billing','auth'] as (string|null)[];
+    t.lastModule = 'auth';
+    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/billing/x.ts');
+    expect(t.panicLevel).toBeGreaterThanOrEqual(1);
+  });
+
+  it('staleDepth floors panicLevel via panic ceiling (staleDepth=3 → min L2)', () => {
+    const t = freshTracker();
+    t.panicScore = 0;
+    // Force stale at depth 3
+    t.freshnessState = 'stale';
+    t.staleDepth = 3;
+    updateTracker(t, 'list_spec_domains', '/fake/repo');
+    // Panic ceiling: staleDepth≥3 → panicLevel ≥ 2
+    expect(t.panicLevel).toBeGreaterThanOrEqual(2);
+  });
+
+  it('panicLevel resets interventionCountSinceStable when dropping to 0', () => {
+    const t = freshTracker();
+    t.panicLevel = 1;
+    t.panicScore = 5; // below down-threshold for L1 (20) → drops to L0
+    t.interventionCountSinceStable = 5;
+    updateTracker(t, 'list_spec_domains', '/fake/repo');
+    expect(t.panicLevel).toBe(0);
+    expect(t.interventionCountSinceStable).toBe(0);
+  });
+
+  it('localityConfidence near 1 at low density', () => {
+    const t = freshTracker();
+    updateTracker(t, 'search_code', '/fake/repo');
+    expect(t.localityConfidence).toBeGreaterThan(0.9);
+  });
+});
+
+// ============================================================================
+// Panic — orient spam protection
+// ============================================================================
+
+describe('panic — orient spam protection', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('normal orient (>2min gap) applies -40 recovery', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    vi.advanceTimersByTime(3 * 60 * 1000); // 3min gap
+    updateTracker(t, 'orient', '/fake/repo');
+    expect(t.panicScore).toBe(10); // 50 - 40
+  });
+
+  it('rapid orient (<2min gap) applies only -15', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    // Simulate a prior orient 30s ago so the next orient is "rapid"
+    t.lastOrientResetAt = Date.now() - 30_000;
+    t.recentOrientCount = 1;
+    updateTracker(t, 'orient', '/fake/repo');
+    expect(t.panicScore).toBe(35); // 50 - 15
+  });
+
+  it('3rd+ rapid orient applies 0 recovery (spam)', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    // Simulate 2 prior rapid orients (count already 2)
+    t.lastOrientResetAt = Date.now() - 30_000;
+    t.recentOrientCount = 2;
+    updateTracker(t, 'orient', '/fake/repo'); // count=3 → spam, delta=0
+    expect(t.panicScore).toBe(50); // no change
+  });
+
+  it('non-rapid orient resets spam counter', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    // Simulate: spam state (2 rapid orients), last orient was 30s ago
+    t.lastOrientResetAt = Date.now() - 30_000;
+    t.recentOrientCount = 2;
+    // Now advance 3min — next orient will be non-rapid
+    vi.advanceTimersByTime(3 * 60 * 1000);
+    updateTracker(t, 'orient', '/fake/repo'); // counter reset to 0, +1 = 1, non-rapid → -40
+    expect(t.panicScore).toBe(10); // 50 - 40
+    expect(t.recentOrientCount).toBe(1);
+  });
+
+  it('panicScore never goes below 0', () => {
+    const t = freshTracker();
+    t.panicScore = 10;
+    vi.advanceTimersByTime(3 * 60 * 1000);
+    updateTracker(t, 'orient', '/fake/repo'); // -40 would give -30, clamped to 0
+    expect(t.panicScore).toBe(0);
+  });
+});
+
+// ============================================================================
+// trackerToPanicState
+// ============================================================================
+
+describe('trackerToPanicState', () => {
+  it('maps tracker fields to PanicState correctly', () => {
+    const t = freshTracker();
+    t.panicScore = 42;
+    t.panicLevel = 1;
+    t.localityConfidence = 0.8;
+    t.recentOrientCount = 2;
+    t.interventionCountSinceStable = 1;
+
+    const state = trackerToPanicState(t, 'claude-code', 'sess-123');
+
+    expect(state.schemaVersion).toBe(1);
+    expect(state.panicScore).toBe(42);
+    expect(state.panicLevel).toBe(1);
+    expect(state.localityConfidence).toBe(0.8);
+    expect(state.recentOrientCount).toBe(2);
+    expect(state.interventionCountSinceStable).toBe(1);
+    expect(state.agentId).toBe('claude-code');
+    expect(state.sessionId).toBe('sess-123');
+    expect(state.updatedAt).toBeTruthy();
+    expect(state.lastOrientAt).toBeTruthy();
+  });
+
+  it('agentId and sessionId are optional', () => {
+    const t = freshTracker();
+    const state = trackerToPanicState(t);
+    expect(state.agentId).toBeUndefined();
+    expect(state.sessionId).toBeUndefined();
   });
 });

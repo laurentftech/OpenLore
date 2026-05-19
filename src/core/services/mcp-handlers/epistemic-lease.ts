@@ -34,6 +34,8 @@ import {
   ARTIFACT_CALL_GRAPH_DB,
 } from '../../../constants.js';
 import { emit } from '../telemetry.js';
+import { applyPanicHysteresis } from './panic-response.js';
+import type { PanicLevel, PanicState } from './panic-response.js';
 
 // ============================================================================
 // TYPES
@@ -63,6 +65,13 @@ export interface EpistemicTracker {
   lastSwitchAt: number;
   /** V3.2: oscillation score — repeated bigram transitions / total transitions [0,1]. */
   oscillation: number;
+  // Panic fields — behavioral destabilization tracking (separate from freshness)
+  panicScore: number;
+  panicLevel: PanicLevel;
+  localityConfidence: number;
+  recentOrientCount: number;
+  lastOrientResetAt: number;
+  interventionCountSinceStable: number;
 }
 
 // ============================================================================
@@ -154,6 +163,56 @@ const SWITCH_DAMPENING_MS           = 5_000;
 // V3.2 oscillation model — detects back-and-forth (A→B→A→B) vs exploration
 const BURST_DENSITY_THRESHOLD       = 0.60;  // density for post-stale burst escalation
 const BURST_TOOL_WEIGHT_THRESHOLD   = 8;     // tool weight for post-stale burst escalation
+
+// Panic constants
+const RAPID_ORIENT_INTERVAL_MS      = 2 * 60 * 1000;  // orients within 2min are "rapid"
+const PANIC_SCORE_MAX               = 100;
+
+// ============================================================================
+// PANIC UPDATE
+// Called on every tool call with current density/oscillation signals.
+// Score delta: positive from instability signals, negative from orient resets.
+// ============================================================================
+
+function updatePanic(
+  tracker: EpistemicTracker,
+  opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string },
+): void {
+  const { density, oscillation, weight, staleDepth, directory = '' } = opts;
+
+  // Per-call score delta from behavioral signals
+  let delta = 0;
+  delta += density >= CROSS_MODULE_STALE_DENSITY ? 25 : density >= CROSS_MODULE_DEGRADE_DENSITY ? 10 : 0;
+  delta += Math.round(oscillation * 30);
+  // Large patch attenuation: when commandEntropy (approximated as oscillation < 0.1) suggests
+  // legitimate burst work (builds, tests), reduce weight contribution.
+  const isHighEntropy = oscillation < 0.1 && density >= CROSS_MODULE_DEGRADE_DENSITY;
+  delta += !isHighEntropy && weight >= BURST_TOOL_WEIGHT_THRESHOLD ? 20 : !isHighEntropy && weight >= 5 ? 10 : 0;
+
+  tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + delta));
+  tracker.localityConfidence = Math.max(0, 1 - density * 2);
+
+  const prevLevel = tracker.panicLevel;
+  tracker.panicLevel = applyPanicHysteresis(tracker.panicLevel, tracker.panicScore, staleDepth);
+
+  if (tracker.panicLevel !== prevLevel) {
+    const trigger = staleDepth >= 2 && tracker.panicLevel > prevLevel ? 'ceiling' : 'score';
+    emit(directory, 'panic', {
+      event: 'panic_level_change',
+      from_level: prevLevel,
+      to_level: tracker.panicLevel,
+      panic_score: tracker.panicScore,
+      density,
+      oscillation,
+      stale_depth: staleDepth,
+      trigger,
+    });
+  }
+
+  if (tracker.panicLevel === 0 && prevLevel > 0) {
+    tracker.interventionCountSinceStable = 0;
+  }
+}
 
 // ============================================================================
 // GIT HASH
@@ -284,17 +343,62 @@ export function createTracker(directory: string): EpistemicTracker {
     lastDensityPenaltyAt: 0,
     lastSwitchAt: 0,
     oscillation: 0,
+    panicScore: 0,
+    panicLevel: 0,
+    localityConfidence: 1,
+    recentOrientCount: 0,
+    lastOrientResetAt: 0,
+    interventionCountSinceStable: 0,
   };
 }
 
 function resetTracker(tracker: EpistemicTracker, directory: string): void {
+  const now = Date.now();
+
+  // Panic: orient spam protection — diminishing recovery bonus on rapid reuse
+  const timeSinceLastOrient = now - tracker.lastOrientResetAt;
+  if (timeSinceLastOrient >= RAPID_ORIENT_INTERVAL_MS) {
+    tracker.recentOrientCount = 0; // non-rapid: reset spam counter
+  }
+  tracker.recentOrientCount++;
+  tracker.lastOrientResetAt = now;
+
+  let panicDelta: number;
+  let orientKind: 'normal' | 'rapid' | 'spam';
+  if (tracker.recentOrientCount >= 3) {
+    panicDelta = 0;   orientKind = 'spam';
+  } else if (timeSinceLastOrient < RAPID_ORIENT_INTERVAL_MS) {
+    panicDelta = -15; orientKind = 'rapid';
+  } else {
+    panicDelta = -40; orientKind = 'normal';
+  }
+
+  const prevScore = tracker.panicScore;
+  const prevLevel = tracker.panicLevel;
+  tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + panicDelta));
+  tracker.localityConfidence = 1;
+  tracker.panicLevel = applyPanicHysteresis(tracker.panicLevel, tracker.panicScore, 0);
+  if (tracker.panicLevel === 0) tracker.interventionCountSinceStable = 0;
+
+  emit(directory, 'panic', {
+    event: 'panic_orient_reset',
+    orient_kind: orientKind,
+    delta: panicDelta,
+    from_score: prevScore,
+    to_score: tracker.panicScore,
+    from_level: prevLevel,
+    to_level: tracker.panicLevel,
+    recent_orient_count: tracker.recentOrientCount,
+    time_since_last_ms: tracker.lastOrientResetAt === now ? timeSinceLastOrient : 0,
+  });
+
   tracker.lastOrientAt = new Date();
   tracker.graphVersionAtOrient = getGitHash(directory);
   tracker.cognitiveLoad = 0;
   tracker.modulesVisited = new Set();
   tracker.freshnessState = 'fresh';
   tracker.staleDepth = 0;
-  tracker.lastGitCheckAt = Date.now();
+  tracker.lastGitCheckAt = now;
   tracker.lastModule = null;
   tracker.moduleAccessWindow = [];
   tracker.lastDensityPenaltyAt = 0;
@@ -356,6 +460,7 @@ export function updateTracker(
         density, oscillation, age_min: Math.floor(ageMs / 60_000), trigger: 'burst',
       });
       tracker.staleDepth = 3;
+      updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
       return;
     }
     const newDepth = computeStaleDepth(tracker.cognitiveLoad, ageMs);
@@ -367,6 +472,7 @@ export function updateTracker(
       });
       tracker.staleDepth = newDepth as StaleDepth;
     }
+    updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
     return;
   }
 
@@ -421,6 +527,8 @@ export function updateTracker(
     tracker.freshnessState = 'degraded';
     emit(directory, 'epistemic-lease', { event: 'degraded', trigger, ...telCtx });
   }
+
+  updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
 }
 
 // ============================================================================
@@ -520,4 +628,20 @@ export function injectFreshness(text: string, tracker: EpistemicTracker): string
   const signal = getFreshnessSignal(tracker);
   if (!signal) return text;
   return signal.prepend ? signal.text + text : text + signal.text;
+}
+
+export function trackerToPanicState(tracker: EpistemicTracker, agentId?: string, sessionId?: string): PanicState {
+  return {
+    schemaVersion: 1,
+    panicScore: tracker.panicScore,
+    panicLevel: tracker.panicLevel,
+    updatedAt: new Date().toISOString(),
+    lastOrientAt: tracker.lastOrientAt.toISOString(),
+    recentOrientCount: tracker.recentOrientCount,
+    localityConfidence: tracker.localityConfidence,
+    interventionCountSinceStable: tracker.interventionCountSinceStable,
+    triggers: [],
+    agentId,
+    sessionId,
+  };
 }

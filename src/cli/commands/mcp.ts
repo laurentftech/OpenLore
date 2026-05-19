@@ -31,8 +31,9 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
-import { createTracker, updateTracker, getFreshnessSignal } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { createTracker, updateTracker, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { writePanicState, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
 import { emit } from '../../core/services/telemetry.js';
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import {
@@ -1356,7 +1357,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         trackerDir = directory;
       }
       // Update epistemic state before dispatch (orient resets tracker internally)
-      if (tracker && directory) updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
+      if (tracker && directory) {
+        updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
+        writePanicState(directory, trackerToPanicState(tracker, agentName));
+      }
 
       let result: unknown;
 
@@ -1540,19 +1544,42 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         };
       }
 
-      emit(directory, 'mcp', { event: 'tool_call', tool: name, ms: Date.now() - _t0, agent: agentName, agent_version: agentVersion });
+      emit(directory, 'mcp', {
+        event: 'tool_call', tool: name, ms: Date.now() - _t0, agent: agentName, agent_version: agentVersion,
+        panic_level: tracker?.panicLevel ?? 0,
+        panic_score: tracker?.panicScore ?? 0,
+      });
 
       const text =
         typeof result === 'string' ? result : JSON.stringify(result, null, 2);
       const signal = tracker ? getFreshnessSignal(tracker) : null;
 
-      // Freshness signal is a separate content item — never concatenated into
-      // the result body — so structured outputs (JSON, patches) are not corrupted.
-      const content: Array<{ type: 'text'; text: string }> = signal
-        ? signal.prepend
-          ? [{ type: 'text', text: signal.text }, { type: 'text', text }]
-          : [{ type: 'text', text }, { type: 'text', text: signal.text }]
-        : [{ type: 'text', text }];
+      // Both freshness and panic signals are separate content items — never
+      // concatenated into the result body — so structured outputs (JSON, patches)
+      // are not corrupted. Panic signal always appended (after result).
+      const content: Array<{ type: 'text'; text: string }> = [];
+      if (signal?.prepend) content.push({ type: 'text', text: signal.text });
+      content.push({ type: 'text', text });
+      if (signal && !signal.prepend) content.push({ type: 'text', text: signal.text });
+
+      if (tracker) {
+        const panicState = trackerToPanicState(tracker, agentName);
+        const panicText = getPanicSignalText(panicState);
+        if (panicText) {
+          content.push({ type: 'text', text: panicText });
+          tracker.interventionCountSinceStable++;
+          writePanicState(directory, trackerToPanicState(tracker, agentName));
+          emit(directory, 'panic', {
+            event: 'panic_signal_injected',
+            panic_level: tracker.panicLevel,
+            panic_score: tracker.panicScore,
+            intervention_count: tracker.interventionCountSinceStable,
+            directive_mode: tracker.interventionCountSinceStable >= 3,
+            tool: name,
+            agent: agentName,
+          });
+        }
+      }
 
       return { content };
     } catch (err) {
