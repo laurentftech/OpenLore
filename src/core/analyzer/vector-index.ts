@@ -140,9 +140,14 @@ function rrfScore(rankDense: number, rankSparse: number, k = 60): number {
   return 1 / (k + rankDense + 1) + 1 / (k + rankSparse + 1);
 }
 
-// Module-level BM25 corpus cache: avoids a full table scan on every search call
-// when the index hasn't changed.  Keyed by dbPath; invalidated when row count changes.
-const _bm25Cache = new Map<string, { corpus: Bm25Corpus; rowCount: number }>();
+// Module-level BM25 corpus cache: avoids a full table scan on every search call.
+// Keyed by dbPath; invalidated by build() when the index is rebuilt.
+const _bm25Cache = new Map<string, { corpus: Bm25Corpus; rowCount: number; rows: Record<string, unknown>[] }>();
+
+// Module-level LanceDB table cache: avoids connect() + openTable() on every search call.
+// Invalidated by build() when the index is rebuilt.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _tableCache = new Map<string, { table: any }>();
 
 // ============================================================================
 // HELPERS
@@ -372,6 +377,10 @@ export class VectorIndex {
     const db = await connect(dbPath);
     await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
 
+    // Invalidate search caches — index was just rebuilt
+    _tableCache.delete(dbPath);
+    _bm25Cache.delete(dbPath);
+
     return { embedded: toEmbed.length, reused: cachedIdx.length };
   }
 
@@ -397,8 +406,6 @@ export class VectorIndex {
       hybrid?: boolean;
     } = {}
   ): Promise<SearchResult[]> {
-    const { connect } = await import('@lancedb/lancedb');
-
     const { limit = 10, language, minFanIn, hybrid = true } = opts;
 
     if (!VectorIndex.exists(outputDir)) {
@@ -406,8 +413,16 @@ export class VectorIndex {
     }
 
     const dbPath = join(outputDir, DB_FOLDER);
-    const db = await connect(dbPath);
-    const table = await db.openTable(TABLE_NAME);
+    let tableEntry = _tableCache.get(dbPath);
+    if (!tableEntry) {
+      const { connect } = await import('@lancedb/lancedb');
+      const db = await connect(dbPath);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const table: any = await db.openTable(TABLE_NAME);
+      tableEntry = { table };
+      _tableCache.set(dbPath, tableEntry);
+    }
+    const table = tableEntry.table;
 
     // ── BM25-only path (no embedding service available) ───────────────────────
     if (!embedSvc) {
@@ -425,7 +440,7 @@ export class VectorIndex {
     if (!queryVector) throw new Error('Failed to embed query');
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
-    const denseRows = await table.query().nearestTo(queryVector).limit(denseFetch).toArray();
+    const denseRows = await table.query().nearestTo(queryVector).limit(denseFetch).toArray() as Record<string, unknown>[];
 
     const passesFilters = (row: Record<string, unknown>): boolean => {
       if (language && (row.language as string) !== language) return false;
@@ -446,22 +461,15 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
-      allRows = await table.query().toArray();
+      allRows = await table.query().toArray() as Record<string, unknown>[];
       const corpus = buildBm25Corpus(
         allRows.map(r => ({ id: r.id as string, text: r.text as string }))
       );
-      cachedEntry = { corpus, rowCount: allRows.length };
+      cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
     } else {
-      // Lightweight cache validation: re-scan only if row count has changed
-      allRows = await table.query().toArray();
-      if (allRows.length !== cachedEntry.rowCount) {
-        const corpus = buildBm25Corpus(
-          allRows.map(r => ({ id: r.id as string, text: r.text as string }))
-        );
-        cachedEntry = { corpus, rowCount: allRows.length };
-        _bm25Cache.set(dbPath, cachedEntry);
-      }
+      // Use cached rows — invalidated by build() when index is rebuilt
+      allRows = cachedEntry.rows;
     }
 
     const { corpus } = cachedEntry;
@@ -531,21 +539,15 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
-      allRows = await table.query().toArray();
+      allRows = await table.query().toArray() as Record<string, unknown>[];
       const corpus = buildBm25Corpus(
         allRows.map(r => ({ id: r.id as string, text: r.text as string }))
       );
-      cachedEntry = { corpus, rowCount: allRows.length };
+      cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
     } else {
-      allRows = await table.query().toArray();
-      if (allRows.length !== cachedEntry.rowCount) {
-        const corpus = buildBm25Corpus(
-          allRows.map(r => ({ id: r.id as string, text: r.text as string }))
-        );
-        cachedEntry = { corpus, rowCount: allRows.length };
-        _bm25Cache.set(dbPath, cachedEntry);
-      }
+      // Use cached rows — invalidated by build() when index is rebuilt
+      allRows = cachedEntry.rows;
     }
 
     const { corpus } = cachedEntry;
