@@ -212,6 +212,10 @@ function updatePanic(
     provenance.push({ name: 'passive_decay', delta: decayDelta, evidence: { elapsed_min: Math.round(elapsedMin * 100) / 100 } });
   }
 
+  // localityConfidence captures sustained coherent local work — both density and oscillation
+  // independently degrade it. Computed here (before signal gating) so it can modulate signals.
+  const localityConfidence = Math.max(0, (1 - Math.min(1, density * 2)) * (1 - Math.min(1, oscillation)));
+
   // Upward signals — suppressed during refractory period after orient() recovery
   if (!inRefractory) {
     if (density >= PANIC_TRAJECTORY_DENSITY) {
@@ -224,10 +228,12 @@ function updatePanic(
       delta += d;
       provenance.push({ name: 'oscillation_spike', delta: d, evidence: { oscillation } });
     }
-    if (staleDepth >= 3) {
+    // stale_depth_3 signal gated by localityConfidence: a stale agent doing focused local
+    // work (high confidence) is much less risky than a stale agent in behavioral drift.
+    if (staleDepth >= 3 && localityConfidence < 0.5) {
       const d = 25;
       delta += d;
-      provenance.push({ name: 'stale_depth_3', delta: d, evidence: { stale_depth: staleDepth } });
+      provenance.push({ name: 'stale_depth_3', delta: d, evidence: { stale_depth: staleDepth, locality_confidence: localityConfidence } });
     }
   }
 
@@ -241,7 +247,7 @@ function updatePanic(
   const scoreBefore = tracker.panicScore;
   tracker.lastPanicUpdateAt = now;
   tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + delta));
-  tracker.localityConfidence = Math.max(0, 1 - density * 2);
+  tracker.localityConfidence = localityConfidence;
 
   // Accumulate trigger names for the current episode (upward signals only)
   const upwardTriggers = provenance.filter(p => p.delta > 0).map(p => p.name);
@@ -541,12 +547,16 @@ export function updateTracker(
   // Already stale — time-based depth escalation only, plus V3.2 burst sensitivity.
   // Load stops accumulating here; burst detection uses tool weight and density instead.
   if (tracker.freshnessState === 'stale') {
-    // Post-stale burst: heavy architectural tool or trajectory burst → immediate depth 3
-    if (tracker.staleDepth < 3 && (weight >= BURST_TOOL_WEIGHT_THRESHOLD || density >= BURST_DENSITY_THRESHOLD)) {
+    // Post-stale burst: heavy architectural tool or trajectory burst → immediate depth 3.
+    // Gated by localityConfidence: a stale agent doing focused local work is not bursting.
+    // High confidence (≥0.5) suppresses burst escalation — only clear behavioral drift triggers it.
+    const isBurst = weight >= BURST_TOOL_WEIGHT_THRESHOLD || density >= BURST_DENSITY_THRESHOLD;
+    if (tracker.staleDepth < 3 && isBurst && tracker.localityConfidence < 0.5) {
       emit(directory, 'epistemic-lease', {
         event: 'depth_escalate', from_depth: tracker.staleDepth, to_depth: 3,
         tool: toolName, module: mod, cognitive_load: tracker.cognitiveLoad,
         density, oscillation, age_min: Math.floor(ageMs / 60_000), trigger: 'burst',
+        locality_confidence: tracker.localityConfidence,
       });
       tracker.staleDepth = 3;
       updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });

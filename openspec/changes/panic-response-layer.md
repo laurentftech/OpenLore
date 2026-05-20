@@ -35,6 +35,33 @@ block agent operation. System correctness MUST NOT depend on hook execution.
 
 ---
 
+## Behavioral Space
+
+Five independent dimensions describe agent state. They can be opposed:
+
+| Situation | Interpretation |
+|-----------|---------------|
+| low density + low entropy | focused local work (coherent, no intervention needed) |
+| high density + high entropy | productive exploration (risky but coherent) |
+| high density + low entropy | panic probable (drift, retry loop) |
+| low density + high oscillation | local contradiction (A↔B without progress) |
+| stale + low panic | deep stale dive (known risk, focused) |
+| fresh + high panic | recent orient(), still confused |
+| stale + high locality confidence | locally coherent stale work (low risk) |
+| stale + low locality confidence + drift | architectural isolation risk |
+
+**Absence of openlore calls is not a failure signal.** An agent doing focused local work with
+high locality confidence has low need for orient() or graph traversal. The working set fits
+in active context. Tool utilization is a proxy — the target is *appropriate* tool utilization,
+not maximum utilization.
+
+The dangerous case is not "0 openlore calls" but:
+```
+many files + large patches + oscillation + retry loops + cross-module + failure traces
+AND no openlore calls
+```
+That is architectural isolation risk. Focused single-file work with no orient() is rational.
+
 ## Freshness vs Panic — Explicit Separation
 
 These are independent dimensions of epistemic state:
@@ -174,6 +201,30 @@ treated as stable state (fail open).
 | Trajectory burst (density ≥ 0.60) | +15 |
 | Oscillation spike (osc ≥ 0.50) | +10 |
 | Stale depth 3 persistence (each call) | +25 |
+
+### Locality Confidence Modulation
+
+`localityConfidence ∈ [0,1]` is computed from both density and oscillation:
+
+```
+localityConfidence = (1 - min(1, density × 2)) × (1 - min(1, oscillation))
+```
+
+High localityConfidence = sustained coherent local work. It modulates the panic system:
+
+| Signal | Gating |
+|--------|--------|
+| `stale_depth_3` (+25/call) | only fires when `localityConfidence < 0.5` |
+| burst escalation (depth → 3) | only fires when `localityConfidence < 0.5` |
+| locality recovery (−3/call) | fires when `density < 0.10 && oscillation < 0.10 && staleDepth = 0` |
+
+**Rationale:** a stale agent doing focused local work (`staleDepth = 3` but `localityConfidence = 0.9`)
+is not in the same risk category as a stale agent drifting cross-module. Suppressing the
+`stale_depth_3` signal in that case prevents the panic system from treating coherent deep
+work as a destabilization event.
+
+This also means the system does NOT maximize orient() calls. It maximizes appropriate
+recontextualization — only when the behavioral signals indicate it is actually needed.
 
 **Trajectory tracking continues while stale.** Module access window and oscillation score
 accumulate during stale state so that post-stale burst and trajectory patterns remain
