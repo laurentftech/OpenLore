@@ -199,6 +199,10 @@ function computeRecovery(mcp: McpEvent[], lease: LeaseEvent[]) {
   };
 }
 
+// Exported for testing
+export type { PanicEvent, LeaseEvent, McpEvent };
+export { computePanicStats, computeRecovery, computeObstinacy };
+
 /**
  * Panic stats: episode count, avg recovery latency, hook intercepts, orient spam.
  */
