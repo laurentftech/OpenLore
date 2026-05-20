@@ -24,7 +24,7 @@ export interface GryphSignals {
   /** Low-entropy + repeated failing commands = destabilized shell activity. */
   repetitiveRetryBurst: boolean;
   /** Any write event > 500 LOC detected in the time window. */
-  largePatchWhileActive: boolean;
+  largePatchWhileStale: boolean;
   /** LOC count of the largest write event seen, 0 if none. */
   largePatchLoc: number;
 }
@@ -52,8 +52,9 @@ interface GryphWriteEvent {
 // CONSTANTS
 // ============================================================================
 
-const GRYPH_TIMEOUT_MS         = 150;   // hard budget per query; total ≤ 200ms
-const GRYPH_DETECT_TIMEOUT_MS  = 50;    // PATH check
+// OPENLORE_GRYPH_TIMEOUT_MS overrides the default 150ms per-query budget.
+const GRYPH_TIMEOUT_MS         = Math.max(50, Number(process.env['OPENLORE_GRYPH_TIMEOUT_MS'] ?? 150));
+const GRYPH_DETECT_TIMEOUT_MS  = 50;    // PATH check (not user-configurable — boot critical)
 const LARGE_PATCH_LOC_THRESHOLD = 500;
 const ENTROPY_LOW_THRESHOLD    = 0.30;  // below = low-diversity / retry-loop
 
@@ -150,9 +151,9 @@ export function queryGryphSignals(since: string): GryphSignals | null {
     // Large patch: find max LOC write event
     const locs = writeEvents.map(e => e.lines ?? e.loc ?? e.additions ?? 0);
     const largePatchLoc = locs.length > 0 ? Math.max(...locs) : 0;
-    const largePatchWhileActive = largePatchLoc > LARGE_PATCH_LOC_THRESHOLD;
+    const largePatchWhileStale = largePatchLoc > LARGE_PATCH_LOC_THRESHOLD;
 
-    return { commandEntropy, repetitiveRetryBurst, largePatchWhileActive, largePatchLoc };
+    return { commandEntropy, repetitiveRetryBurst, largePatchWhileStale, largePatchLoc };
   } catch {
     return null; // always fail open
   }
@@ -180,7 +181,7 @@ export function applyGryphDelta(
     triggers.push('repetitive_retry_burst');
   }
 
-  if (signals.largePatchWhileActive && isStale) {
+  if (signals.largePatchWhileStale && isStale) {
     // Large patch attenuation: high entropy = deliberate refactor → +10, not +30
     const attenuated = signals.commandEntropy > 0.60;
     delta += attenuated ? 10 : 30;

@@ -1356,7 +1356,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         tracker = createTracker(directory);
         trackerDir = directory;
       }
-      // Update epistemic state before dispatch (orient resets tracker internally)
+      // Update epistemic state before dispatch (orient resets tracker internally).
+      // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
+      // telemetry) are separate processes that read state but never call updateTracker —
+      // no recursive panic feedback loop from openlore internal commands.
       if (tracker && directory) {
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
         writePanicState(directory, trackerToPanicState(tracker, agentName));
