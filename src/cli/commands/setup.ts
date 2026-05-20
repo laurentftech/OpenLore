@@ -25,6 +25,50 @@ import { logger } from '../../utils/logger.js';
 import { installPreCommitHook, installClaudeHook } from './decisions.js';
 
 // ============================================================================
+// PANIC CHECK HOOK
+// Installs openlore panic-check as a PreToolUse hook in .claude/settings.json.
+// ============================================================================
+
+const PANIC_CHECK_HOOK_MARKER = 'openlore panic-check';
+
+interface ClaudeHookSettings {
+  hooks?: {
+    PreToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
+    PostToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export async function installPanicCheckHook(rootPath: string, format: string = 'claude'): Promise<void> {
+  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  let settings: ClaudeHookSettings = {};
+
+  try {
+    settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as ClaudeHookSettings;
+  } catch { /* file missing or corrupt — start fresh */ }
+
+  const hooks = settings.hooks?.PreToolUse ?? [];
+  if (hooks.some((h) => JSON.stringify(h).includes(PANIC_CHECK_HOOK_MARKER))) {
+    logger.success('panic-check PreToolUse hook already present in .claude/settings.json');
+    return;
+  }
+
+  const hookEntry = {
+    _comment: 'openlore: behavioral destabilization guard — fires before every tool call',
+    type: 'command',
+    command: `openlore panic-check --directory "$(pwd)" --format ${format}`,
+  };
+
+  settings.hooks ??= {};
+  settings.hooks.PreToolUse = [...hooks, hookEntry];
+
+  await mkdir(join(rootPath, '.claude'), { recursive: true });
+  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  logger.success(`panic-check PreToolUse hook added to .claude/settings.json (format: ${format})`);
+}
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -280,7 +324,11 @@ export const setupCommand = new Command('setup')
     false
   )
   .option('--dir <path>', 'Project root directory', process.cwd())
-  .action(async (options: { tools?: string; force: boolean; dir: string }) => {
+  .option(
+    '--hooks <format>',
+    'Install PreToolUse panic-check hook for the given agent format: claude|kilo|codex'
+  )
+  .action(async (options: { tools?: string; force: boolean; dir: string; hooks?: string }) => {
     const projectRoot = options.dir;
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa'];
 
@@ -363,6 +411,16 @@ export const setupCommand = new Command('setup')
     if (tools.includes('claude')) {
       await installPreCommitHook(projectRoot);
       await installClaudeHook(projectRoot);
+    }
+
+    // --hooks flag: install panic-check PreToolUse hook independently of --tools
+    if (options.hooks) {
+      const validFormats = ['claude', 'kilo', 'codex'];
+      const fmt = validFormats.includes(options.hooks) ? options.hooks : 'claude';
+      if (!validFormats.includes(options.hooks)) {
+        logger.warning(`Unknown hooks format "${options.hooks}" — defaulting to "claude"`);
+      }
+      await installPanicCheckHook(projectRoot, fmt);
     }
 
     // ── Report ───────────────────────────────────────────────────────────────

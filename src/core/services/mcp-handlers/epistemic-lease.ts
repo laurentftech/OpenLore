@@ -72,6 +72,10 @@ export interface EpistemicTracker {
   recentOrientCount: number;
   lastOrientResetAt: number;
   interventionCountSinceStable: number;
+  /** Epoch ms of last panic score update — for passive decay calculation. */
+  lastPanicUpdateAt: number;
+  /** Accumulated signal trigger labels for the current panic episode. */
+  panicTriggers: string[];
 }
 
 // ============================================================================
@@ -167,6 +171,11 @@ const BURST_TOOL_WEIGHT_THRESHOLD   = 8;     // tool weight for post-stale burst
 // Panic constants
 const RAPID_ORIENT_INTERVAL_MS      = 2 * 60 * 1000;  // orients within 2min are "rapid"
 const PANIC_SCORE_MAX               = 100;
+// Spec-correct panic signal thresholds
+const PANIC_TRAJECTORY_DENSITY      = 0.60;  // trajectory burst → +15
+const PANIC_OSCILLATION_THRESHOLD   = 0.50;  // oscillation spike → +10
+const PANIC_DECAY_PER_MIN           = 5;     // passive wall-clock decay
+const PANIC_LOCALITY_RECOVERY       = 3;     // per-call recovery when stable
 
 // ============================================================================
 // PANIC UPDATE
@@ -178,19 +187,46 @@ function updatePanic(
   tracker: EpistemicTracker,
   opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string },
 ): void {
-  const { density, oscillation, weight, staleDepth, directory = '' } = opts;
+  const { density, oscillation, staleDepth, directory = '' } = opts;
+  const now = Date.now();
 
-  // Per-call score delta from behavioral signals
-  let delta = 0;
-  delta += density >= CROSS_MODULE_STALE_DENSITY ? 25 : density >= CROSS_MODULE_DEGRADE_DENSITY ? 10 : 0;
-  delta += Math.round(oscillation * 30);
-  // Large patch attenuation: when commandEntropy (approximated as oscillation < 0.1) suggests
-  // legitimate burst work (builds, tests), reduce weight contribution.
-  const isHighEntropy = oscillation < 0.1 && density >= CROSS_MODULE_DEGRADE_DENSITY;
-  delta += !isHighEntropy && weight >= BURST_TOOL_WEIGHT_THRESHOLD ? 20 : !isHighEntropy && weight >= 5 ? 10 : 0;
+  // Passive wall-clock decay: -5 per minute elapsed since last update
+  const elapsedMin = tracker.lastPanicUpdateAt > 0
+    ? Math.max(0, (now - tracker.lastPanicUpdateAt) / 60_000)
+    : 0;
+  const decay = Math.floor(elapsedMin * PANIC_DECAY_PER_MIN);
 
+  // Per-call score delta from behavioral signals (spec §3.1)
+  let delta = -decay;
+  const callTriggers: string[] = [];
+
+  if (density >= PANIC_TRAJECTORY_DENSITY) {
+    delta += 15;
+    callTriggers.push('trajectory_burst');
+  }
+  if (oscillation >= PANIC_OSCILLATION_THRESHOLD) {
+    delta += 10;
+    callTriggers.push('oscillation_spike');
+  }
+  if (staleDepth >= 3) {
+    delta += 25;
+    callTriggers.push('stale_depth_3');
+  }
+
+  // Locality recovery: calm stable work reduces panic
+  if (density < 0.10 && oscillation < 0.10 && staleDepth === 0) {
+    delta -= PANIC_LOCALITY_RECOVERY;
+    callTriggers.push('locality_recovery');
+  }
+
+  tracker.lastPanicUpdateAt = now;
   tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + delta));
   tracker.localityConfidence = Math.max(0, 1 - density * 2);
+
+  // Accumulate triggers for the current episode
+  for (const t of callTriggers) {
+    if (!tracker.panicTriggers.includes(t)) tracker.panicTriggers.push(t);
+  }
 
   const prevLevel = tracker.panicLevel;
   tracker.panicLevel = applyPanicHysteresis(tracker.panicLevel, tracker.panicScore, staleDepth);
@@ -206,11 +242,13 @@ function updatePanic(
       oscillation,
       stale_depth: staleDepth,
       trigger,
+      call_triggers: callTriggers,
     });
   }
 
   if (tracker.panicLevel === 0 && prevLevel > 0) {
     tracker.interventionCountSinceStable = 0;
+    tracker.panicTriggers = [];
   }
 }
 
@@ -349,6 +387,8 @@ export function createTracker(directory: string): EpistemicTracker {
     recentOrientCount: 0,
     lastOrientResetAt: 0,
     interventionCountSinceStable: 0,
+    lastPanicUpdateAt: 0,
+    panicTriggers: [],
   };
 }
 
@@ -378,7 +418,10 @@ function resetTracker(tracker: EpistemicTracker, directory: string): void {
   tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + panicDelta));
   tracker.localityConfidence = 1;
   tracker.panicLevel = applyPanicHysteresis(tracker.panicLevel, tracker.panicScore, 0);
-  if (tracker.panicLevel === 0) tracker.interventionCountSinceStable = 0;
+  if (tracker.panicLevel === 0) {
+    tracker.interventionCountSinceStable = 0;
+    tracker.panicTriggers = [];
+  }
 
   emit(directory, 'panic', {
     event: 'panic_orient_reset',
@@ -640,7 +683,7 @@ export function trackerToPanicState(tracker: EpistemicTracker, agentId?: string,
     recentOrientCount: tracker.recentOrientCount,
     localityConfidence: tracker.localityConfidence,
     interventionCountSinceStable: tracker.interventionCountSinceStable,
-    triggers: [],
+    triggers: [...tracker.panicTriggers],
     agentId,
     sessionId,
   };
