@@ -30,6 +30,8 @@ export interface PanicState {
   localityConfidence: number;
   interventionCountSinceStable: number;
   triggers: string[];
+  /** ISO — upward signals suppressed until this timestamp after an orient() recovery. */
+  panicRecoverySuppressionUntil?: string;
   agentId?: string;
   sessionId?: string;
 }

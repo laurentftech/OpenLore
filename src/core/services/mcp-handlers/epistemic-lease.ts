@@ -76,6 +76,8 @@ export interface EpistemicTracker {
   lastPanicUpdateAt: number;
   /** Accumulated signal trigger labels for the current panic episode. */
   panicTriggers: string[];
+  /** Epoch ms — upward panic signals suppressed until this time after orient() recovery. */
+  panicRecoverySuppressionUntil: number;
 }
 
 // ============================================================================
@@ -176,6 +178,7 @@ const PANIC_TRAJECTORY_DENSITY      = 0.60;  // trajectory burst → +15
 const PANIC_OSCILLATION_THRESHOLD   = 0.50;  // oscillation spike → +10
 const PANIC_DECAY_PER_MIN           = 5;     // passive wall-clock decay
 const PANIC_LOCALITY_RECOVERY       = 3;     // per-call recovery when stable
+const PANIC_REFRACTORY_MS           = 45_000; // post-orient suppression window (45s)
 
 // ============================================================================
 // PANIC UPDATE
@@ -183,66 +186,103 @@ const PANIC_LOCALITY_RECOVERY       = 3;     // per-call recovery when stable
 // Score delta: positive from instability signals, negative from orient resets.
 // ============================================================================
 
+interface PanicProvenanceItem {
+  name: string;
+  delta: number;
+  evidence: Record<string, number | string | boolean>;
+}
+
 function updatePanic(
   tracker: EpistemicTracker,
-  opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string },
+  opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string },
 ): void {
-  const { density, oscillation, staleDepth, directory = '' } = opts;
+  const { density, oscillation, staleDepth, directory = '', tool = '' } = opts;
   const now = Date.now();
+  const inRefractory = tracker.panicRecoverySuppressionUntil > now;
 
   // Passive wall-clock decay: -5 per minute elapsed since last update
   const elapsedMin = tracker.lastPanicUpdateAt > 0
     ? Math.max(0, (now - tracker.lastPanicUpdateAt) / 60_000)
     : 0;
-  const decay = Math.floor(elapsedMin * PANIC_DECAY_PER_MIN);
+  const decayDelta = -Math.floor(elapsedMin * PANIC_DECAY_PER_MIN);
 
-  // Per-call score delta from behavioral signals (spec §3.1)
-  let delta = -decay;
-  const callTriggers: string[] = [];
-
-  if (density >= PANIC_TRAJECTORY_DENSITY) {
-    delta += 15;
-    callTriggers.push('trajectory_burst');
-  }
-  if (oscillation >= PANIC_OSCILLATION_THRESHOLD) {
-    delta += 10;
-    callTriggers.push('oscillation_spike');
-  }
-  if (staleDepth >= 3) {
-    delta += 25;
-    callTriggers.push('stale_depth_3');
+  let delta = decayDelta;
+  const provenance: PanicProvenanceItem[] = [];
+  if (decayDelta < 0) {
+    provenance.push({ name: 'passive_decay', delta: decayDelta, evidence: { elapsed_min: Math.round(elapsedMin * 100) / 100 } });
   }
 
-  // Locality recovery: calm stable work reduces panic
+  // Upward signals — suppressed during refractory period after orient() recovery
+  if (!inRefractory) {
+    if (density >= PANIC_TRAJECTORY_DENSITY) {
+      const d = 15;
+      delta += d;
+      provenance.push({ name: 'trajectory_burst', delta: d, evidence: { density } });
+    }
+    if (oscillation >= PANIC_OSCILLATION_THRESHOLD) {
+      const d = 10;
+      delta += d;
+      provenance.push({ name: 'oscillation_spike', delta: d, evidence: { oscillation } });
+    }
+    if (staleDepth >= 3) {
+      const d = 25;
+      delta += d;
+      provenance.push({ name: 'stale_depth_3', delta: d, evidence: { stale_depth: staleDepth } });
+    }
+  }
+
+  // Locality recovery — always applies, not gated by refractory
   if (density < 0.10 && oscillation < 0.10 && staleDepth === 0) {
-    delta -= PANIC_LOCALITY_RECOVERY;
-    callTriggers.push('locality_recovery');
+    const d = -PANIC_LOCALITY_RECOVERY;
+    delta += d;
+    provenance.push({ name: 'locality_recovery', delta: d, evidence: { density, oscillation } });
   }
 
+  const scoreBefore = tracker.panicScore;
   tracker.lastPanicUpdateAt = now;
   tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + delta));
   tracker.localityConfidence = Math.max(0, 1 - density * 2);
 
-  // Accumulate triggers for the current episode
-  for (const t of callTriggers) {
+  // Accumulate trigger names for the current episode (upward signals only)
+  const upwardTriggers = provenance.filter(p => p.delta > 0).map(p => p.name);
+  for (const t of upwardTriggers) {
     if (!tracker.panicTriggers.includes(t)) tracker.panicTriggers.push(t);
   }
 
   const prevLevel = tracker.panicLevel;
   tracker.panicLevel = applyPanicHysteresis(tracker.panicLevel, tracker.panicScore, staleDepth);
 
+  // Emit provenance trace whenever score changes with active signals
+  if (tracker.panicScore !== scoreBefore && provenance.length > 0) {
+    emit(directory, 'panic', {
+      event: 'panic_score_delta',
+      tool,
+      score_before: scoreBefore,
+      score_after: tracker.panicScore,
+      delta,
+      in_refractory: inRefractory,
+      stale_depth: staleDepth,
+      density,
+      oscillation,
+      triggers: provenance,
+    });
+  }
+
   if (tracker.panicLevel !== prevLevel) {
-    const trigger = staleDepth >= 2 && tracker.panicLevel > prevLevel ? 'ceiling' : 'score';
+    const levelTrigger = staleDepth >= 2 && tracker.panicLevel > prevLevel ? 'ceiling' : 'score';
     emit(directory, 'panic', {
       event: 'panic_level_change',
+      tool,
       from_level: prevLevel,
       to_level: tracker.panicLevel,
+      score_before: scoreBefore,
       panic_score: tracker.panicScore,
       density,
       oscillation,
       stale_depth: staleDepth,
-      trigger,
-      call_triggers: callTriggers,
+      in_refractory: inRefractory,
+      trigger: levelTrigger,
+      provenance,
     });
   }
 
@@ -389,6 +429,7 @@ export function createTracker(directory: string): EpistemicTracker {
     interventionCountSinceStable: 0,
     lastPanicUpdateAt: 0,
     panicTriggers: [],
+    panicRecoverySuppressionUntil: 0,
   };
 }
 
@@ -421,6 +462,11 @@ function resetTracker(tracker: EpistemicTracker, directory: string): void {
   if (tracker.panicLevel === 0) {
     tracker.interventionCountSinceStable = 0;
     tracker.panicTriggers = [];
+  }
+  // Set refractory window when orient() achieves actual score reduction.
+  // Suppresses upward signals for 45s to let recovery land before re-escalating.
+  if (panicDelta < 0) {
+    tracker.panicRecoverySuppressionUntil = now + PANIC_REFRACTORY_MS;
   }
 
   emit(directory, 'panic', {
@@ -503,7 +549,7 @@ export function updateTracker(
         density, oscillation, age_min: Math.floor(ageMs / 60_000), trigger: 'burst',
       });
       tracker.staleDepth = 3;
-      updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
+      updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
       return;
     }
     const newDepth = computeStaleDepth(tracker.cognitiveLoad, ageMs);
@@ -515,7 +561,7 @@ export function updateTracker(
       });
       tracker.staleDepth = newDepth as StaleDepth;
     }
-    updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
+    updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
     return;
   }
 
@@ -571,7 +617,7 @@ export function updateTracker(
     emit(directory, 'epistemic-lease', { event: 'degraded', trigger, ...telCtx });
   }
 
-  updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory });
+  updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
 }
 
 // ============================================================================
@@ -684,6 +730,9 @@ export function trackerToPanicState(tracker: EpistemicTracker, agentId?: string,
     localityConfidence: tracker.localityConfidence,
     interventionCountSinceStable: tracker.interventionCountSinceStable,
     triggers: [...tracker.panicTriggers],
+    panicRecoverySuppressionUntil: tracker.panicRecoverySuppressionUntil > Date.now()
+      ? new Date(tracker.panicRecoverySuppressionUntil).toISOString()
+      : undefined,
     agentId,
     sessionId,
   };

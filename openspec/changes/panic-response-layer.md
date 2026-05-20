@@ -243,6 +243,26 @@ large patch = likely panicked patching.
 
 Score clamped to `[0, 100]` after every operation.
 
+### Refractory Period
+
+After orient() achieves a score reduction (`panicDelta < 0`), upward signals are suppressed
+for `PANIC_REFRACTORY_MS` (45 seconds). Locality recovery and passive decay still apply.
+
+```
+panicRecoverySuppressionUntil = now + 45s   (set by orient() on any score-reducing call)
+```
+
+During the refractory window:
+- `trajectory_burst`, `oscillation_spike`, `stale_depth_3` → skipped
+- `passive_decay`, `locality_recovery` → still applied
+
+This prevents panic from immediately re-escalating after recovery. Without it, a single burst
+trajectory immediately after orient() would undo the recovery bonus before the agent has had
+a chance to re-anchor. The 45s window matches orient() → first few tool calls latency.
+
+`panicRecoverySuppressionUntil` is stored in the state file (as ISO string, omitted when
+not active) so the hook can apply the same guard without re-querying the MCP server.
+
 ### orient() Spam Protection
 
 `orient()` recovery is diminishing to prevent gaming the reset mechanism:
@@ -540,11 +560,34 @@ with short cooldowns can be sampled at 10% without losing behavioral signal.
 | `panic_recovery` | score_before, score_after, via, latency_ms |
 | `orient_spam_detected` | recentOrientCount, bonusApplied |
 
-**Source attribution:** Every score delta event includes:
+**Panic provenance trace.** Every `panic_score_delta` event includes full per-trigger
+attribution with measured evidence, enabling calibration and faux positif analysis:
+
 ```json
-{"panicDelta": +15, "source": "trajectory_burst"}
+{
+  "event": "panic_score_delta",
+  "tool": "trace_execution_path",
+  "score_before": 42,
+  "score_after": 57,
+  "delta": 15,
+  "in_refractory": false,
+  "stale_depth": 3,
+  "density": 0.67,
+  "oscillation": 0.54,
+  "triggers": [
+    { "name": "trajectory_burst", "delta": 15, "evidence": { "density": 0.67 } },
+    { "name": "passive_decay",    "delta": -5, "evidence": { "elapsed_min": 1.0 } }
+  ]
+}
 ```
-Per-source breakdown enables calibration of signal weights over time.
+
+Separating "trigger" (the signal that fired) from "evidence" (the measured value that
+activated it) is required for calibration. Without evidence, the log answers "what fired"
+but not "why" — which makes threshold tuning impossible.
+
+`in_refractory: true` on events where upward signals were suppressed is critical for
+detecting over-refractory situations (panic rising despite suppression is evidence that
+the threshold is wrong or the window is too short).
 
 `channel` field: `mcp` or `hook`.
 
@@ -560,9 +603,54 @@ Per-source breakdown enables calibration of signal weights over time.
 
 ---
 
+## Known Limitations
+
+**Oscillation fragility.** `oscillation` alone is not sufficient. Back-and-forth between
+two modules is normal in several productive patterns:
+
+```
+backend ↔ frontend
+interface ↔ implementation
+test ↔ fix (TDD)
+caller ↔ callee
+```
+
+The real signal is `oscillation + no convergence`. V1 lacks a convergence signal. This will
+produce faux positifs on legitimate paired workflows. Mitigation: oscillation threshold set
+conservatively (0.50), require +density burst for L3+ transitions. V2 should add
+convergence tracking (see below).
+
+**Productive chaos.** A large-scale refactor is behaviorally indistinguishable from a panic
+episode:
+
+- many modules touched
+- large writes
+- broken builds
+- repeated commands
+- oscillation between test/impl
+- trajectory density spikes
+
+`commandEntropy` mitigates this partially. High entropy + large patch = attenuated signal.
+But monorepo traversal, rename cascades, and API sync are cases where `commandEntropy` stays
+high AND trajectory density stays high — false panic guaranteed. V2 needs a "productive
+refactor mode" signal (see below).
+
+**Goal coherence absent.** Current model measures movement, oscillation, and repetition
+but not progression. A→B→C→D→E looks identical whether the agent is systematically
+working through a refactor or drifting with no coherent goal. Without some notion of
+`currentTaskScope` or objective tracking, the model cannot distinguish these.
+
+**Hook dependency.** The PreToolUse hook must NEVER become mandatory. If the hook is absent,
+disabled, or times out, the MCP flow must proceed normally. System correctness must never
+depend on hook execution. Runtimes may install the hook for observability; they must not
+treat its absence as a failure condition.
+
 ## Non-Goals (initial version)
 
-- Hard blocking at L4
+- Hard blocking at L4 (advisory only, forever)
+- Goal coherence / task scope tracking (V2 — requires agent protocol changes)
+- Convergence signals (V2 — needs "new module frontier" and "same error recurrence" tracking)
+- Productive refactor mode detection (V2 — expanding module frontier + low contradiction persistence)
 - Agents beyond Claude Code, kilocode, Codex
 - Gryph as a required dependency
 - Psychological modeling, intent classification, prompt inspection
