@@ -6,11 +6,10 @@
 export type ProjectType = 'nodejs' | 'python' | 'rust' | 'go' | 'java' | 'ruby' | 'php' | 'unknown';
 
 // Panic response impact level
-// privacy: no instrumentation — updateTracker() skipped entirely, zero behavioral profiling
-// off: instrumentation runs in-memory, no persistence, no intervention
+// off: no instrumentation — updateTracker() skipped, zero behavioral profiling (default)
 // telemetry: instrumentation + persistence, no intervention
 // advisory / experimental_blocking: full pipeline with response injection / block signal
-export type PanicResponseMode = 'privacy' | 'off' | 'telemetry' | 'advisory' | 'experimental_blocking';
+export type PanicResponseMode = 'off' | 'telemetry' | 'advisory' | 'experimental_blocking';
 
 // Configuration types
 export interface OpenLoreConfig {
@@ -24,8 +23,7 @@ export interface OpenLoreConfig {
   panicResponse?: {
     /**
      * Controls instrumentation, scoring, and intervention.
-     * 'privacy': skips updateTracker() entirely — zero behavioral profiling.
-     * 'off': in-memory tracking only, no persistence or intervention (default).
+     * 'off': skips updateTracker() entirely — zero behavioral profiling (default).
      * 'telemetry': tracking + persistence, no intervention.
      * 'advisory' / 'experimental_blocking': full pipeline.
      */

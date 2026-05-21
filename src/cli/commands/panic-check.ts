@@ -30,7 +30,7 @@ export const panicCheckCommand = new Command('panic-check')
       const cfg = await readOpenLoreConfig(dir);
       const mode = cfg?.panicResponse?.mode ?? 'off';
 
-      if (mode === 'privacy' || mode === 'off' || mode === 'telemetry') {
+      if (mode === 'off' || mode === 'telemetry') {
         // Panic disabled or telemetry-only: hook passes through silently
         process.exit(0);
       }
