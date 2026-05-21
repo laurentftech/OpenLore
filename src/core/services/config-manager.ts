@@ -65,6 +65,7 @@ export function getDefaultConfig(projectType: ProjectType, openspecPath: string)
       model: DEFAULT_ANTHROPIC_MODEL,
       domains: 'auto',
     },
+    panicResponse: { mode: 'off' },
     createdAt: new Date().toISOString(),
     lastRun: null,
   };

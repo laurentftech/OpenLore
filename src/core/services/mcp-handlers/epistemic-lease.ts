@@ -65,6 +65,8 @@ export interface EpistemicTracker {
   lastSwitchAt: number;
   /** V3.2: oscillation score — repeated bigram transitions / total transitions [0,1]. */
   oscillation: number;
+  /** V3.2: last computed cross-module density [0,1] — stored so callers can read after updateTracker(). */
+  density: number;
   // Panic fields — behavioral destabilization tracking (separate from freshness)
   panicScore: number;
   panicLevel: PanicLevel;
@@ -192,7 +194,7 @@ interface PanicProvenanceItem {
   evidence: Record<string, number | string | boolean>;
 }
 
-function updatePanic(
+export function updatePanic(
   tracker: EpistemicTracker,
   opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string },
 ): void {
@@ -212,9 +214,9 @@ function updatePanic(
     provenance.push({ name: 'passive_decay', delta: decayDelta, evidence: { elapsed_min: Math.round(elapsedMin * 100) / 100 } });
   }
 
-  // localityConfidence captures sustained coherent local work — both density and oscillation
-  // independently degrade it. Computed here (before signal gating) so it can modulate signals.
-  const localityConfidence = Math.max(0, (1 - Math.min(1, density * 2)) * (1 - Math.min(1, oscillation)));
+  // localityConfidence is computed in updateTracker() and stored in tracker.
+  // Read it here so signal gating uses the current value.
+  const localityConfidence = tracker.localityConfidence;
 
   // Upward signals — suppressed during refractory period after orient() recovery
   if (!inRefractory) {
@@ -247,7 +249,6 @@ function updatePanic(
   const scoreBefore = tracker.panicScore;
   tracker.lastPanicUpdateAt = now;
   tracker.panicScore = Math.min(PANIC_SCORE_MAX, Math.max(0, tracker.panicScore + delta));
-  tracker.localityConfidence = localityConfidence;
 
   // Accumulate trigger names for the current episode (upward signals only)
   const upwardTriggers = provenance.filter(p => p.delta > 0).map(p => p.name);
@@ -433,6 +434,7 @@ export function createTracker(directory: string): EpistemicTracker {
     lastDensityPenaltyAt: 0,
     lastSwitchAt: 0,
     oscillation: 0,
+    density: 0,
     panicScore: 0,
     panicLevel: 0,
     localityConfidence: 1,
@@ -549,6 +551,10 @@ export function updateTracker(
   const density = computeCrossModuleDensity(tracker.moduleAccessWindow);
   const oscillation = computeOscillationScore(tracker.moduleAccessWindow);
   tracker.oscillation = oscillation;
+  tracker.density = density;
+  // localityConfidence is a navigation coherence metric — computed here so it's
+  // always current regardless of whether panic scoring is enabled.
+  tracker.localityConfidence = Math.max(0, (1 - Math.min(1, density * 2)) * (1 - Math.min(1, oscillation)));
 
   // Already stale — time-based depth escalation only, plus V3.2 burst sensitivity.
   // Load stops accumulating here; burst detection uses tool weight and density instead.
@@ -565,7 +571,6 @@ export function updateTracker(
         locality_confidence: tracker.localityConfidence,
       });
       tracker.staleDepth = 3;
-      updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
       return;
     }
     const newDepth = computeStaleDepth(tracker.cognitiveLoad, ageMs);
@@ -577,7 +582,6 @@ export function updateTracker(
       });
       tracker.staleDepth = newDepth as StaleDepth;
     }
-    updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
     return;
   }
 
@@ -632,8 +636,6 @@ export function updateTracker(
     tracker.freshnessState = 'degraded';
     emit(directory, 'epistemic-lease', { event: 'degraded', trigger, ...telCtx });
   }
-
-  updatePanic(tracker, { density, oscillation, weight, staleDepth: tracker.staleDepth, directory, tool: toolName });
 }
 
 // ============================================================================

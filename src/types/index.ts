@@ -5,6 +5,9 @@
 // Project detection types
 export type ProjectType = 'nodejs' | 'python' | 'rust' | 'go' | 'java' | 'ruby' | 'php' | 'unknown';
 
+// Panic response impact level
+export type PanicResponseMode = 'off' | 'telemetry' | 'advisory' | 'experimental_blocking';
+
 // Configuration types
 export interface OpenLoreConfig {
   version: string;
@@ -14,6 +17,14 @@ export interface OpenLoreConfig {
   generation: GenerationConfig;
   llm?: LLMConfig;
   embedding?: EmbeddingConfig;
+  panicResponse?: {
+    /**
+     * Controls panic scoring and intervention only — freshness tracking (density,
+     * oscillation, staleDepth, localityConfidence) is always computed regardless.
+     * Default: 'off'.
+     */
+    mode: PanicResponseMode;
+  };
   createdAt: string;
   lastRun: string | null;
 }

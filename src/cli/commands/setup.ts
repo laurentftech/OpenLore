@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
 import { installPreCommitHook, installClaudeHook } from './decisions.js';
+import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
+import type { PanicResponseMode } from '../../types/index.js';
 
 // ============================================================================
 // PANIC CHECK HOOK
@@ -328,7 +330,11 @@ export const setupCommand = new Command('setup')
     '--hooks <format>',
     'Install PreToolUse panic-check hook for the given agent format: claude|kilo|codex'
   )
-  .action(async (options: { tools?: string; force: boolean; dir: string; hooks?: string }) => {
+  .option(
+    '--panic <mode>',
+    'Set panic response mode in .openlore/config.json: off|telemetry|advisory|experimental_blocking'
+  )
+  .action(async (options: { tools?: string; force: boolean; dir: string; hooks?: string; panic?: string }) => {
     const projectRoot = options.dir;
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa'];
 
@@ -421,6 +427,24 @@ export const setupCommand = new Command('setup')
         logger.warning(`Unknown hooks format "${options.hooks}" — defaulting to "claude"`);
       }
       await installPanicCheckHook(projectRoot, fmt);
+    }
+
+    // --panic flag: update panicResponse.mode in .openlore/config.json
+    if (options.panic !== undefined) {
+      const validModes: PanicResponseMode[] = ['off', 'telemetry', 'advisory', 'experimental_blocking'];
+      if (!validModes.includes(options.panic as PanicResponseMode)) {
+        logger.error(`Unknown panic mode "${options.panic}". Valid: ${validModes.join(', ')}`);
+      } else {
+        const mode = options.panic as PanicResponseMode;
+        const cfg = await readOpenLoreConfig(projectRoot);
+        if (!cfg) {
+          logger.warning('No .openlore/config.json found — run openlore init first.');
+        } else {
+          cfg.panicResponse = { mode };
+          await writeOpenLoreConfig(projectRoot, cfg);
+          logger.success(`panic response mode set to "${mode}"`);
+        }
+      }
     }
 
     // ── Report ───────────────────────────────────────────────────────────────

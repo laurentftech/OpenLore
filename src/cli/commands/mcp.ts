@@ -31,10 +31,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
-import { createTracker, updateTracker, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { createTracker, updateTracker, updatePanic, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import type { PanicResponseMode } from '../../types/index.js';
 import { writePanicState, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
 import { emit } from '../../core/services/telemetry.js';
+import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import {
   handleGetCallGraph,
@@ -1307,6 +1309,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // Per-session epistemic lease tracker — re-initialized when directory changes.
   let tracker: EpistemicTracker | undefined;
   let trackerDir = '';
+  let panicPolicy: PanicResponseMode = 'off';
 
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
@@ -1355,6 +1358,11 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (directory && (!tracker || directory !== trackerDir)) {
         tracker = createTracker(directory);
         trackerDir = directory;
+        const cfg = await readOpenLoreConfig(directory);
+        panicPolicy = cfg?.panicResponse?.mode ?? 'off';
+        if (panicPolicy !== 'off') {
+          emit(directory, 'panic-response', { event: 'panic_mode_active', mode: panicPolicy });
+        }
       }
       // Update epistemic state before dispatch (orient resets tracker internally).
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
@@ -1362,7 +1370,17 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // no recursive panic feedback loop from openlore internal commands.
       if (tracker && directory) {
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
-        writePanicState(directory, trackerToPanicState(tracker, agentName));
+        if (panicPolicy !== 'off') {
+          updatePanic(tracker, {
+            density: tracker.density,
+            oscillation: tracker.oscillation,
+            weight: 1,  // weight read from TOOL_WEIGHTS inside updatePanic via opts — set baseline here
+            staleDepth: tracker.staleDepth,
+            directory,
+            tool: name,
+          });
+          writePanicState(directory, trackerToPanicState(tracker, agentName));
+        }
       }
 
       let result: unknown;
@@ -1565,7 +1583,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       content.push({ type: 'text', text });
       if (signal && !signal.prepend) content.push({ type: 'text', text: signal.text });
 
-      if (tracker) {
+      if (tracker && (panicPolicy === 'advisory' || panicPolicy === 'experimental_blocking')) {
         const panicState = trackerToPanicState(tracker, agentName);
         const panicText = getPanicSignalText(panicState);
         if (panicText) {

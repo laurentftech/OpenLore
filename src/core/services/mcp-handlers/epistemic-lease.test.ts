@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createTracker, updateTracker, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
+import { createTracker, updateTracker, updatePanic, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
 import type { EpistemicTracker } from './epistemic-lease.js';
 
 // ============================================================================
@@ -623,6 +623,19 @@ describe('updateTracker — V3.1 cross-module trajectory', () => {
 });
 
 // ============================================================================
+// Panic helpers — policy is now external; tests must call updatePanic() explicitly
+// after updateTracker() when they want to observe panic scoring behavior.
+// ============================================================================
+
+function callBoth(t: EpistemicTracker, tool: string, dir: string, filePath?: string): void {
+  updateTracker(t, tool, dir, filePath);
+  // orient is handled by resetTracker() internally; do not double-apply panic scoring.
+  if (tool !== 'orient') {
+    updatePanic(t, { density: t.density, oscillation: t.oscillation, weight: 1, staleDepth: t.staleDepth, directory: dir, tool });
+  }
+}
+
+// ============================================================================
 // Panic — score accumulation and level transitions
 // ============================================================================
 
@@ -638,7 +651,7 @@ describe('panic — score and level via updateTracker', () => {
     // Build A→B→A→B oscillation (bigram repetition) driving oscillation score up
     for (let i = 0; i < 15; i++) {
       const mod = i % 2 === 0 ? 'auth' : 'billing';
-      updateTracker(t, 'search_code', '/fake/repo', `src/${mod}/x.ts`);
+      callBoth(t, 'search_code', '/fake/repo', `src/${mod}/x.ts`);
     }
     expect(t.panicScore).toBeGreaterThan(0);
   });
@@ -650,7 +663,7 @@ describe('panic — score and level via updateTracker', () => {
     t.moduleAccessWindow = ['auth','billing','auth','billing','auth','billing','auth','billing',
       'auth','billing','auth','billing','auth','billing','auth'] as (string|null)[];
     t.lastModule = 'auth';
-    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/billing/x.ts');
+    callBoth(t, 'trace_execution_path', '/fake/repo', 'src/billing/x.ts');
     expect(t.panicLevel).toBeGreaterThanOrEqual(1);
   });
 
@@ -660,7 +673,7 @@ describe('panic — score and level via updateTracker', () => {
     // Force stale at depth 3
     t.freshnessState = 'stale';
     t.staleDepth = 3;
-    updateTracker(t, 'list_spec_domains', '/fake/repo');
+    callBoth(t, 'list_spec_domains', '/fake/repo');
     // Panic ceiling: staleDepth≥3 → panicLevel ≥ 2
     expect(t.panicLevel).toBeGreaterThanOrEqual(2);
   });
@@ -670,7 +683,7 @@ describe('panic — score and level via updateTracker', () => {
     t.panicLevel = 1;
     t.panicScore = 5; // below down-threshold for L1 (20) → drops to L0
     t.interventionCountSinceStable = 5;
-    updateTracker(t, 'list_spec_domains', '/fake/repo');
+    callBoth(t, 'list_spec_domains', '/fake/repo');
     expect(t.panicLevel).toBe(0);
     expect(t.interventionCountSinceStable).toBe(0);
   });
@@ -757,7 +770,7 @@ describe('panic — individual signal detection', () => {
     ] as (string|null)[];
     t.lastModule = 'e';
     // density = 14 switches / 15 = 0.93 → trajectory_burst fires
-    updateTracker(t, 'search_code', '/fake/repo', 'src/f/x.ts');
+    callBoth(t, 'search_code', '/fake/repo', 'src/f/x.ts');
     // +15 trajectory_burst (oscillation may also add +10 if ≥0.50)
     expect(t.panicScore).toBeGreaterThanOrEqual(15);
   });
@@ -771,7 +784,7 @@ describe('panic — individual signal detection', () => {
     t.moduleAccessWindow = window;
     t.lastModule = 'billing';
     // This call adds 'auth', creating another A→B→A bigram → oscillation stays high
-    updateTracker(t, 'search_code', '/fake/repo', 'src/auth/x.ts');
+    callBoth(t, 'search_code', '/fake/repo', 'src/auth/x.ts');
     // oscillation_spike (+10) + trajectory_burst (+15) both fire
     expect(t.panicScore).toBeGreaterThanOrEqual(10);
   });
@@ -784,7 +797,7 @@ describe('panic — individual signal detection', () => {
     // Build low localityConfidence via high density + oscillation in window
     t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
     t.localityConfidence = 0.1; // already low from previous calls — gate should open
-    updateTracker(t, 'search_code', '/fake/repo', 'src/c/x.ts');
+    callBoth(t, 'search_code', '/fake/repo', 'src/c/x.ts');
     // trajectory_burst + oscillation_spike + stale_depth_3 all fire
     expect(t.panicScore).toBeGreaterThanOrEqual(25);
   });
@@ -797,7 +810,7 @@ describe('panic — individual signal detection', () => {
     // Empty window → density=0, oscillation=0 → localityConfidence=1.0
     t.moduleAccessWindow = [];
     t.localityConfidence = 1.0;
-    updateTracker(t, 'search_code', '/fake/repo'); // no filePath → stays in same module
+    callBoth(t, 'search_code', '/fake/repo'); // no filePath → stays in same module
     // stale_depth_3 gate blocked; only decay/locality_recovery may apply
     // score should not increase (no upward signals fire at high localityConfidence)
     expect(t.panicScore).toBe(0);
@@ -809,7 +822,7 @@ describe('panic — individual signal detection', () => {
     t.moduleAccessWindow = []; // empty → density=0, oscillation=0
     t.localityConfidence = 1.0;
     t.staleDepth = 0;
-    updateTracker(t, 'search_code', '/fake/repo'); // no cross-module activity
+    callBoth(t, 'search_code', '/fake/repo'); // no cross-module activity
     // locality_recovery (-3) fires; panicScore should drop
     expect(t.panicScore).toBeLessThan(20);
   });
@@ -852,7 +865,7 @@ describe('panic — refractory period after orient()', () => {
     t.lastModule = 'a';
     t.freshnessState = 'stale';
     t.staleDepth = 3;
-    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
+    callBoth(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
 
     // Upward signals blocked by refractory — score should not increase above post-orient value
     // (may decrease from decay/locality_recovery, but not increase)
@@ -874,7 +887,7 @@ describe('panic — refractory period after orient()', () => {
     t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
     t.lastModule = 'a';
     t.localityConfidence = 0.0;
-    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
+    callBoth(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
 
     // Signals should now fire → score increases
     expect(t.panicScore).toBeGreaterThan(scoreAfterOrient);
@@ -940,9 +953,11 @@ describe('panic — burst escalation gate', () => {
     const t = freshTracker();
     t.freshnessState = 'stale';
     t.staleDepth = 1;
-    t.localityConfidence = 0.1; // low confidence — drift
-    // trace_execution_path (weight=8) → burst condition met
-    updateTracker(t, 'trace_execution_path', '/fake/repo');
+    // A→B→A→B oscillation → density + oscillation both high → localityConfidence computed < 0.5
+    t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
+    t.lastModule = 'a';
+    // trace_execution_path (weight=8) → burst condition met; localityConfidence computed from window
+    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
     expect(t.staleDepth).toBe(3);
   });
 });
