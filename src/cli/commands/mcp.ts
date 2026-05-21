@@ -1360,7 +1360,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         trackerDir = directory;
         const cfg = await readOpenLoreConfig(directory);
         panicPolicy = cfg?.panicResponse?.mode ?? 'off';
-        if (panicPolicy !== 'off') {
+        if (panicPolicy !== 'off' && panicPolicy !== 'privacy') {
           emit(directory, 'panic-response', { event: 'panic_mode_active', mode: panicPolicy });
         }
       }
@@ -1368,7 +1368,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
       // telemetry) are separate processes that read state but never call updateTracker —
       // no recursive panic feedback loop from openlore internal commands.
-      if (tracker && directory) {
+      if (tracker && directory && panicPolicy !== 'privacy') {
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
         if (panicPolicy !== 'off') {
           updatePanic(tracker, {
