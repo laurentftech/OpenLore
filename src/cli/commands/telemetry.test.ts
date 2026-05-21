@@ -192,9 +192,6 @@ describe('computeRecovery', () => {
   function orientCall(offsetMs: number): McpEvent {
     return { ts: ts(offsetMs), event: 'tool_call', tool: 'orient', ms: 50 };
   }
-  function toolCall(name: string, offsetMs: number): McpEvent {
-    return { ts: ts(offsetMs), event: 'tool_call', tool: name, ms: 20 };
-  }
   function degraded(offsetMs: number): LeaseEvent {
     return { ts: ts(offsetMs), event: 'degraded' };
   }
