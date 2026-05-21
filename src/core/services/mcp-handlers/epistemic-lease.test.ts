@@ -741,6 +741,213 @@ describe('panic — orient spam protection', () => {
 });
 
 // ============================================================================
+// Panic — signal detection (trajectory_burst, oscillation_spike, stale_depth_3)
+// ============================================================================
+
+describe('panic — individual signal detection', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('trajectory_burst (+15) fires when density >= 0.60', () => {
+    const t = freshTracker();
+    t.panicScore = 0;
+    // Fill window with dense cross-module switching (10 distinct modules in 15 slots)
+    t.moduleAccessWindow = [
+      'a','b','c','d','e','f','g','h','i','j','a','b','c','d','e',
+    ] as (string|null)[];
+    t.lastModule = 'e';
+    // density = 14 switches / 15 = 0.93 → trajectory_burst fires
+    updateTracker(t, 'search_code', '/fake/repo', 'src/f/x.ts');
+    // +15 trajectory_burst (oscillation may also add +10 if ≥0.50)
+    expect(t.panicScore).toBeGreaterThanOrEqual(15);
+  });
+
+  it('oscillation_spike (+10) fires when oscillation >= 0.50', () => {
+    const t = freshTracker();
+    t.panicScore = 0;
+    // Pure A→B bigram repetition → oscillation = 1.0
+    const window: (string|null)[] = [];
+    for (let i = 0; i < 14; i++) window.push(i % 2 === 0 ? 'auth' : 'billing');
+    t.moduleAccessWindow = window;
+    t.lastModule = 'billing';
+    // This call adds 'auth', creating another A→B→A bigram → oscillation stays high
+    updateTracker(t, 'search_code', '/fake/repo', 'src/auth/x.ts');
+    // oscillation_spike (+10) + trajectory_burst (+15) both fire
+    expect(t.panicScore).toBeGreaterThanOrEqual(10);
+  });
+
+  it('stale_depth_3 (+25) fires when staleDepth=3 AND localityConfidence < 0.5', () => {
+    const t = freshTracker();
+    t.panicScore = 0;
+    t.freshnessState = 'stale';
+    t.staleDepth = 3;
+    // Build low localityConfidence via high density + oscillation in window
+    t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
+    t.localityConfidence = 0.1; // already low from previous calls — gate should open
+    updateTracker(t, 'search_code', '/fake/repo', 'src/c/x.ts');
+    // trajectory_burst + oscillation_spike + stale_depth_3 all fire
+    expect(t.panicScore).toBeGreaterThanOrEqual(25);
+  });
+
+  it('stale_depth_3 does NOT fire when localityConfidence >= 0.5 (focused stale work)', () => {
+    const t = freshTracker();
+    t.panicScore = 0;
+    t.freshnessState = 'stale';
+    t.staleDepth = 3;
+    // Empty window → density=0, oscillation=0 → localityConfidence=1.0
+    t.moduleAccessWindow = [];
+    t.localityConfidence = 1.0;
+    updateTracker(t, 'search_code', '/fake/repo'); // no filePath → stays in same module
+    // stale_depth_3 gate blocked; only decay/locality_recovery may apply
+    // score should not increase (no upward signals fire at high localityConfidence)
+    expect(t.panicScore).toBe(0);
+  });
+
+  it('locality_recovery (-3) fires when density < 0.10, oscillation < 0.10, staleDepth = 0', () => {
+    const t = freshTracker();
+    t.panicScore = 20;
+    t.moduleAccessWindow = []; // empty → density=0, oscillation=0
+    t.localityConfidence = 1.0;
+    t.staleDepth = 0;
+    updateTracker(t, 'search_code', '/fake/repo'); // no cross-module activity
+    // locality_recovery (-3) fires; panicScore should drop
+    expect(t.panicScore).toBeLessThan(20);
+  });
+});
+
+// ============================================================================
+// Panic — refractory period
+// ============================================================================
+
+describe('panic — refractory period after orient()', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('orient() sets panicRecoverySuppressionUntil when score reduces', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    vi.advanceTimersByTime(3 * 60 * 1000);
+    updateTracker(t, 'orient', '/fake/repo'); // -40 → score=10, refractory set
+    expect(t.panicRecoverySuppressionUntil).toBeGreaterThan(Date.now());
+  });
+
+  it('spam orient (delta=0) does NOT set refractory', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    t.lastOrientResetAt = Date.now() - 30_000;
+    t.recentOrientCount = 2; // 3rd rapid → spam → delta=0
+    updateTracker(t, 'orient', '/fake/repo');
+    expect(t.panicRecoverySuppressionUntil).toBe(0); // not set
+  });
+
+  it('upward signals suppressed during refractory window', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    vi.advanceTimersByTime(3 * 60 * 1000);
+    updateTracker(t, 'orient', '/fake/repo'); // sets refractory
+    const scoreAfterOrient = t.panicScore;
+
+    // Now trigger high density + oscillation conditions
+    t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
+    t.lastModule = 'a';
+    t.freshnessState = 'stale';
+    t.staleDepth = 3;
+    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
+
+    // Upward signals blocked by refractory — score should not increase above post-orient value
+    // (may decrease from decay/locality_recovery, but not increase)
+    expect(t.panicScore).toBeLessThanOrEqual(scoreAfterOrient);
+  });
+
+  it('upward signals resume after refractory window expires', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    vi.advanceTimersByTime(3 * 60 * 1000);
+    updateTracker(t, 'orient', '/fake/repo'); // sets refractory
+    const scoreAfterOrient = t.panicScore;
+
+    // Advance past the 45s refractory window
+    vi.advanceTimersByTime(50_000);
+    t.panicRecoverySuppressionUntil = Date.now() - 1; // force expiry
+
+    // Now trigger burst conditions
+    t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
+    t.lastModule = 'a';
+    t.localityConfidence = 0.0;
+    updateTracker(t, 'trace_execution_path', '/fake/repo', 'src/b/x.ts');
+
+    // Signals should now fire → score increases
+    expect(t.panicScore).toBeGreaterThan(scoreAfterOrient);
+  });
+});
+
+// ============================================================================
+// Panic — localityConfidence formula
+// ============================================================================
+
+describe('panic — localityConfidence formula', () => {
+  it('high oscillation alone degrades localityConfidence even at low density', () => {
+    const t = freshTracker();
+    // Fill with same-module oscillation: stays in 'auth', no cross-module switches
+    // but builds up bigram repetition
+    t.moduleAccessWindow = ['auth','auth','auth','auth','auth','auth','auth','auth',
+                            'auth','auth','auth','auth','auth','auth','auth'] as (string|null)[];
+    // density = 0 (no switches), oscillation = 0 (same module, no bigram repetition)
+    updateTracker(t, 'search_code', '/fake/repo', 'src/auth/x.ts');
+    // low density, low oscillation (all same module) → localityConfidence near 1
+    expect(t.localityConfidence).toBeGreaterThan(0.9);
+  });
+
+  it('high density alone degrades localityConfidence', () => {
+    const t = freshTracker();
+    // Dense cross-module switching, no oscillation (linear A→B→C→D)
+    t.moduleAccessWindow = ['a','b','c','d','e','f','g','h','i','j','k','l','m','n','o'] as (string|null)[];
+    t.lastModule = 'o';
+    updateTracker(t, 'search_code', '/fake/repo', 'src/p/x.ts');
+    // High density → localityConfidence degrades toward 0
+    expect(t.localityConfidence).toBeLessThan(0.2);
+  });
+
+  it('both density and oscillation combine multiplicatively', () => {
+    const t = freshTracker();
+    // A→B oscillation (high both density and oscillation)
+    t.moduleAccessWindow = ['a','b','a','b','a','b','a','b','a','b','a','b','a','b','a'] as (string|null)[];
+    t.lastModule = 'a';
+    updateTracker(t, 'search_code', '/fake/repo', 'src/b/x.ts');
+    // Both density and oscillation high → confidence very low (multiplicative kill)
+    expect(t.localityConfidence).toBeLessThan(0.1);
+  });
+});
+
+// ============================================================================
+// Panic — burst escalation gated by localityConfidence
+// ============================================================================
+
+describe('panic — burst escalation gate', () => {
+  it('burst (heavy tool on stale) does NOT escalate to depth 3 at high localityConfidence', () => {
+    const t = freshTracker();
+    t.freshnessState = 'stale';
+    t.staleDepth = 1;
+    t.localityConfidence = 0.9; // high confidence — focused work
+    t.moduleAccessWindow = []; // empty → density=0
+    // trace_execution_path has weight 8 → burst condition met (weight >= BURST_TOOL_WEIGHT_THRESHOLD)
+    updateTracker(t, 'trace_execution_path', '/fake/repo');
+    // Burst escalation blocked by high localityConfidence
+    expect(t.staleDepth).toBeLessThan(3);
+  });
+
+  it('burst escalates to depth 3 when localityConfidence < 0.5', () => {
+    const t = freshTracker();
+    t.freshnessState = 'stale';
+    t.staleDepth = 1;
+    t.localityConfidence = 0.1; // low confidence — drift
+    // trace_execution_path (weight=8) → burst condition met
+    updateTracker(t, 'trace_execution_path', '/fake/repo');
+    expect(t.staleDepth).toBe(3);
+  });
+});
+
+// ============================================================================
 // trackerToPanicState
 // ============================================================================
 

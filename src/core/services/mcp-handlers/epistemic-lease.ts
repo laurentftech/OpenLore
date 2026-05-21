@@ -388,13 +388,19 @@ function computeCrossModuleDensity(window: (string | null)[]): number {
 function computeOscillationScore(window: (string | null)[]): number {
   const modules = window.filter((m): m is string => m !== null);
   if (modules.length < 3) return 0;
-  let repeated = 0;
-  let total = 0;
-  for (let i = 2; i < modules.length; i++) {
-    total++;
-    if (modules[i] === modules[i - 2]) repeated++;
+  // Compute over transition sequence (entries where module actually changed).
+  // A→A→A→A → 0 transitions → oscillation = 0 (focused local work, not confusion).
+  // A→B→A→B → transitions [A,B,A,B] → oscillation = 1.0 (pure confusion loop).
+  const transitions: string[] = [modules[0]!];
+  for (let i = 1; i < modules.length; i++) {
+    if (modules[i] !== modules[i - 1]) transitions.push(modules[i]!);
   }
-  return total > 0 ? repeated / total : 0;
+  if (transitions.length < 3) return 0;
+  let repeated = 0;
+  for (let i = 2; i < transitions.length; i++) {
+    if (transitions[i] === transitions[i - 2]) repeated++;
+  }
+  return repeated / (transitions.length - 2);
 }
 
 // ============================================================================
