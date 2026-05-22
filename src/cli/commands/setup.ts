@@ -332,7 +332,7 @@ export const setupCommand = new Command('setup')
   )
   .option(
     '--panic <mode>',
-    'Set panic response mode in .openlore/config.json: off|telemetry|advisory|experimental_blocking'
+    'Set panic response mode in .openlore/config.json: off|observe|advisory|experimental_blocking'
   )
   .action(async (options: { tools?: string; force: boolean; dir: string; hooks?: string; panic?: string }) => {
     const projectRoot = options.dir;
@@ -431,7 +431,7 @@ export const setupCommand = new Command('setup')
 
     // --panic flag: update panicResponse.mode in .openlore/config.json
     if (options.panic !== undefined) {
-      const validModes: PanicResponseMode[] = ['off', 'telemetry', 'advisory', 'experimental_blocking'];
+      const validModes: PanicResponseMode[] = ['off', 'observe', 'advisory', 'experimental_blocking'];
       if (!validModes.includes(options.panic as PanicResponseMode)) {
         logger.error(`Unknown panic mode "${options.panic}". Valid: ${validModes.join(', ')}`);
       } else {

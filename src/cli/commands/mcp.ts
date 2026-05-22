@@ -1368,17 +1368,19 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
       // telemetry) are separate processes that read state but never call updateTracker —
       // no recursive panic feedback loop from openlore internal commands.
-      if (tracker && directory && panicPolicy !== 'off') {
+      if (tracker && directory) {
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
-        updatePanic(tracker, {
-          density: tracker.density,
-          oscillation: tracker.oscillation,
-          weight: 1,  // weight read from TOOL_WEIGHTS inside updatePanic via opts — set baseline here
-          staleDepth: tracker.staleDepth,
-          directory,
-          tool: name,
-        });
-        writePanicState(directory, trackerToPanicState(tracker, agentName));
+        if (panicPolicy !== 'off') {
+          updatePanic(tracker, {
+            density: tracker.density,
+            oscillation: tracker.oscillation,
+            weight: 1,  // weight read from TOOL_WEIGHTS inside updatePanic via opts — set baseline here
+            staleDepth: tracker.staleDepth,
+            directory,
+            tool: name,
+          });
+          writePanicState(directory, trackerToPanicState(tracker, agentName));
+        }
       }
 
       let result: unknown;
