@@ -83,6 +83,38 @@ export const HOOK_COOLDOWN_MS: Record<PanicLevel, number> = {
 };
 
 // ============================================================================
+// GRYPH SIGNAL WEIGHTS
+// ============================================================================
+
+/** Repetitive retry burst (low entropy + failing commands). */
+export const GRYPH_RETRY_BURST_DELTA = 15;
+
+/** Large patch while stale, low command entropy (non-deliberate). */
+export const GRYPH_LARGE_PATCH_LOW_ENTROPY_DELTA = 30;
+
+/** Large patch while stale, high command entropy (deliberate refactor — attenuated). */
+export const GRYPH_LARGE_PATCH_HIGH_ENTROPY_DELTA = 10;
+
+/** LOC threshold for "large patch" classification. */
+export const GRYPH_LARGE_PATCH_LOC_THRESHOLD = 500;
+
+/** Command entropy below this = low-diversity / retry loop. */
+export const GRYPH_ENTROPY_LOW_THRESHOLD = 0.30;
+
+/** Command entropy above this = deliberate exploratory work (attenuation gate). */
+export const GRYPH_ENTROPY_HIGH_THRESHOLD = 0.60;
+
+// ============================================================================
+// GRYPH POLLING
+// ============================================================================
+
+/** Default poll interval for background Gryph behavioral ingestion. */
+export const GRYPH_POLL_INTERVAL_MS = 15_000;
+
+/** Minimum allowed poll interval (env override floor). */
+export const GRYPH_POLL_INTERVAL_MIN_MS = 5_000;
+
+// ============================================================================
 // SEVERITY MAP
 // ============================================================================
 

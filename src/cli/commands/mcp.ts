@@ -35,6 +35,7 @@ import { createTracker, updateTracker, updatePanic, getFreshnessSignal, trackerT
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { writePanicState, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
+import { startGryphPolling } from '../../core/services/mcp-handlers/gryph-bridge.js';
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
@@ -1310,6 +1311,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   let tracker: EpistemicTracker | undefined;
   let trackerDir = '';
   let panicPolicy: PanicResponseMode = 'off';
+  let stopGryphPolling: (() => void) | null = null;
 
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
@@ -1356,12 +1358,19 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
       // Init (or re-init when project directory changes between calls)
       if (directory && (!tracker || directory !== trackerDir)) {
+        stopGryphPolling?.();
+        stopGryphPolling = null;
         tracker = createTracker(directory);
         trackerDir = directory;
         const cfg = await readOpenLoreConfig(directory);
         panicPolicy = cfg?.panicResponse?.mode ?? 'off';
         if (panicPolicy !== 'off') {
           emit(directory, 'panic-response', { event: 'panic_mode_active', mode: panicPolicy });
+          const _tracker = tracker;
+          stopGryphPolling = startGryphPolling({
+            directory,
+            getTracker: () => _tracker,
+          });
         }
       }
       // Update epistemic state before dispatch (orient resets tracker internally).
