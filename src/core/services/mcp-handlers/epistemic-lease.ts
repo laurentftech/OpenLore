@@ -479,6 +479,8 @@ function resetTracker(tracker: EpistemicTracker, directory: string): void {
   }
   // Set refractory window when orient() achieves actual score reduction.
   // Suppresses upward signals for 45s to let recovery land before re-escalating.
+  // Subsequent orient() calls during an active refractory replace the deadline
+  // (not extend): the window always starts fresh from the most recent recovery.
   if (panicDelta < 0) {
     tracker.panicRecoverySuppressionUntil = now + PANIC_REFRACTORY_MS;
   }
@@ -552,7 +554,8 @@ export function updateTracker(
   const oscillation = computeOscillationScore(tracker.moduleAccessWindow);
   tracker.oscillation = oscillation;
   tracker.density = density;
-  // localityConfidence is a navigation coherence metric — computed here so it's
+  // localityConfidence is shared behavioral state: used by freshness (burst gate)
+  // and panic (stale_depth_3 gate, burst escalation gate). Computed here so it's
   // always current regardless of whether panic scoring is enabled.
   tracker.localityConfidence = Math.max(0, (1 - Math.min(1, density * 2)) * (1 - Math.min(1, oscillation)));
 
