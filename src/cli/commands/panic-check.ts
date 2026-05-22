@@ -79,9 +79,10 @@ export const panicCheckCommand = new Command('panic-check')
       }
 
       // experimental_blocking: emit block signal at L4 — runtime decides enforcement.
-      // OpenLore always exits 0. This is NOT the same as an advisory level.
+      // advisory:true is explicit in the payload: OpenLore recommends, never mandates.
+      // OpenLore always exits 0.
       if (mode === 'experimental_blocking' && state.panicLevel >= 4) {
-        const blockOutput = { decision: 'block' as const, panicLevel: state.panicLevel, message: output.message };
+        const blockOutput = { decision: 'block' as const, advisory: true, panicLevel: state.panicLevel, message: output.message };
         process.stdout.write(JSON.stringify(blockOutput) + '\n');
         process.exit(0);
       }

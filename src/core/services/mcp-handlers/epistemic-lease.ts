@@ -70,6 +70,11 @@ export interface EpistemicTracker {
   // Panic fields — behavioral destabilization tracking (separate from freshness)
   panicScore: number;
   panicLevel: PanicLevel;
+  /**
+   * Shared behavioral coherence metric [0,1].
+   * Used by: freshness burst gating AND panic escalation gating (stale_depth_3, burst).
+   * WARNING: changes affect both systems. Modify with full blast-radius awareness.
+   */
   localityConfidence: number;
   recentOrientCount: number;
   lastOrientResetAt: number;

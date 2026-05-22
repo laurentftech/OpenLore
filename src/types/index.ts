@@ -22,10 +22,16 @@ export interface OpenLoreConfig {
   embedding?: EmbeddingConfig;
   panicResponse?: {
     /**
-     * Controls panic scoring and intervention. Freshness/epistemic tracking always runs.
-     * 'off': panic subsystem disabled entirely (default).
-     * 'observe': panic scoring + state written, no intervention.
-     * 'advisory' / 'experimental_blocking': full pipeline with response injection.
+     * Controls the panic response subsystem. Default: 'off'.
+     *
+     * 'off' disables: panic scoring, panic state persistence, panic interventions,
+     *   panic telemetry, panic hook output.
+     *   Behavioral metrics required by the freshness engine (density, oscillation,
+     *   localityConfidence) continue to be computed in-memory as part of EpistemicLease.
+     * 'observe': panic scoring + state written, no intervention (collect only).
+     * 'advisory': full pipeline with L2+ response injection.
+     * 'experimental_blocking': advisory + runtime-mediated block signal at L4.
+     *   advisory:true is always present in the payload — runtime decides enforcement.
      */
     mode: PanicResponseMode;
   };
