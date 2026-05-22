@@ -5,6 +5,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createTracker, updateTracker, updatePanic, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
 import type { EpistemicTracker } from './epistemic-lease.js';
+import {
+  PANIC_TRAJECTORY_DENSITY,
+  PANIC_TRAJECTORY_DELTA,
+  PANIC_OSCILLATION_THRESHOLD,
+  PANIC_OSCILLATION_DELTA,
+  PANIC_STALE_D3_LOCALITY_GATE,
+  PANIC_STALE_D3_DELTA,
+  PANIC_REFRACTORY_MS,
+  PANIC_UP_THRESHOLD,
+  PANIC_DOWN_THRESHOLD,
+  HOOK_COOLDOWN_MS,
+} from './panic-constants.js';
 
 // ============================================================================
 // Mock git hash — default returns stable hash

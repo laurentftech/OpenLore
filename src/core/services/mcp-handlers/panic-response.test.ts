@@ -19,6 +19,12 @@ import {
   getPanicSignalText,
 } from './panic-response.js';
 import type { PanicState, PanicLevel } from './panic-response.js';
+import {
+  PANIC_UP_THRESHOLD,
+  PANIC_DOWN_THRESHOLD,
+  HOOK_COOLDOWN_MS,
+  PANIC_SESSION_EXPIRY_MS,
+} from './panic-constants.js';
 import { OPENLORE_DIR } from '../../../constants.js';
 
 // ============================================================================
@@ -27,41 +33,40 @@ import { OPENLORE_DIR } from '../../../constants.js';
 
 describe('applyPanicHysteresis', () => {
   it('stays 0 below up-threshold', () => {
-    expect(applyPanicHysteresis(0, 29, 0)).toBe(0);
+    expect(applyPanicHysteresis(0, PANIC_UP_THRESHOLD[0] - 1, 0)).toBe(0);
   });
 
-  it('transitions 0→1 at score 30', () => {
-    expect(applyPanicHysteresis(0, 30, 0)).toBe(1);
+  it('transitions 0→1 at up-threshold', () => {
+    expect(applyPanicHysteresis(0, PANIC_UP_THRESHOLD[0], 0)).toBe(1);
   });
 
-  it('transitions 1→2 at score 50', () => {
-    expect(applyPanicHysteresis(1, 50, 0)).toBe(2);
+  it('transitions 1→2 at up-threshold', () => {
+    expect(applyPanicHysteresis(1, PANIC_UP_THRESHOLD[1], 0)).toBe(2);
   });
 
-  it('transitions 2→3 at score 70', () => {
-    expect(applyPanicHysteresis(2, 70, 0)).toBe(3);
+  it('transitions 2→3 at up-threshold', () => {
+    expect(applyPanicHysteresis(2, PANIC_UP_THRESHOLD[2], 0)).toBe(3);
   });
 
   it('L3→L4 requires staleDepth ≥ 3', () => {
-    expect(applyPanicHysteresis(3, 90, 2)).toBe(3); // score meets threshold but stale too low
-    expect(applyPanicHysteresis(3, 90, 3)).toBe(4);
+    expect(applyPanicHysteresis(3, PANIC_UP_THRESHOLD[3], 2)).toBe(3);
+    expect(applyPanicHysteresis(3, PANIC_UP_THRESHOLD[3], 3)).toBe(4);
   });
 
   it('does not downgrade when score above down-threshold', () => {
-    expect(applyPanicHysteresis(2, 41, 0)).toBe(2); // down-threshold for L2 is 40
+    expect(applyPanicHysteresis(2, PANIC_DOWN_THRESHOLD[2] + 1, 0)).toBe(2);
   });
 
-  it('downgrade 2→1 when score below 40', () => {
-    expect(applyPanicHysteresis(2, 39, 0)).toBe(1);
+  it('downgrade 2→1 when score below down-threshold', () => {
+    expect(applyPanicHysteresis(2, PANIC_DOWN_THRESHOLD[2] - 1, 0)).toBe(1);
   });
 
-  it('downgrade 3→2 when score below 60', () => {
-    expect(applyPanicHysteresis(3, 59, 0)).toBe(2);
+  it('downgrade 3→2 when score below down-threshold', () => {
+    expect(applyPanicHysteresis(3, PANIC_DOWN_THRESHOLD[3] - 1, 0)).toBe(2);
   });
 
   it('no simultaneous up and down transition', () => {
-    // score 30 → up to 1; no further down in same call
-    expect(applyPanicHysteresis(0, 30, 0)).toBe(1);
+    expect(applyPanicHysteresis(0, PANIC_UP_THRESHOLD[0], 0)).toBe(1);
   });
 
   it('panic ceiling: staleDepth ≥ 3 floors minimum at L2', () => {
@@ -114,8 +119,8 @@ describe('readPanicState', () => {
     expect(state.panicLevel).toBe(0);
   });
 
-  it('returns defaultPanicState when session expired (>30min)', async () => {
-    const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  it('returns defaultPanicState when session expired', async () => {
+    const old = new Date(Date.now() - PANIC_SESSION_EXPIRY_MS - 60_000).toISOString();
     const expired: PanicState = { ...defaultPanicState(), panicScore: 80, panicLevel: 3, updatedAt: old, lastOrientAt: old };
     await writeFile(join(dir, OPENLORE_DIR, 'panic-state.json'), JSON.stringify(expired), 'utf-8');
     const state = readPanicState(dir);
@@ -156,8 +161,8 @@ describe('buildPanicCheckOutput', () => {
     expect(out.message).toContain('[PANIC:ELEVATED]');
   });
 
-  it('returns allow when within L1 cooldown (120s)', () => {
-    const recentIntervention = new Date(Date.now() - 60_000).toISOString(); // 60s ago < 120s cooldown
+  it('returns allow when within L1 cooldown', () => {
+    const recentIntervention = new Date(Date.now() - HOOK_COOLDOWN_MS[1] / 2).toISOString();
     const state: PanicState = {
       ...defaultPanicState(),
       panicLevel: 1,
@@ -167,8 +172,8 @@ describe('buildPanicCheckOutput', () => {
     expect(out.decision).toBe('allow');
   });
 
-  it('returns warn when L1 cooldown expired (>120s)', () => {
-    const oldIntervention = new Date(Date.now() - 130_000).toISOString();
+  it('returns warn when L1 cooldown expired', () => {
+    const oldIntervention = new Date(Date.now() - HOOK_COOLDOWN_MS[1] - 10_000).toISOString();
     const state: PanicState = {
       ...defaultPanicState(),
       panicLevel: 1,

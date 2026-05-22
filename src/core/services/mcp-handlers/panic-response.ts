@@ -12,6 +12,13 @@
 import { writeFileSync, renameSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { OPENLORE_DIR } from '../../../constants.js';
+import {
+  PANIC_UP_THRESHOLD,
+  PANIC_DOWN_THRESHOLD,
+  HOOK_COOLDOWN_MS,
+  SEVERITY_MAP,
+  PANIC_SESSION_EXPIRY_MS,
+} from './panic-constants.js';
 
 // ============================================================================
 // TYPES
@@ -47,14 +54,6 @@ export interface PanicCheckOutput {
 // ============================================================================
 
 const PANIC_STATE_FILE = 'panic-state.json';
-const SESSION_EXPIRY_MS = 30 * 60 * 1000;
-
-// Hysteresis: separate up/down thresholds prevent score thrashing at boundaries
-const PANIC_UP_THRESHOLD: Record<number, number>   = { 0: 30, 1: 50, 2: 70, 3: 90 };
-const PANIC_DOWN_THRESHOLD: Record<number, number> = { 1: 20, 2: 40, 3: 60, 4: 80 };
-
-// Cooldowns: sparse injection prevents context saturation and habituation
-const HOOK_COOLDOWN_MS: Record<PanicLevel, number> = { 0: 0, 1: 120_000, 2: 60_000, 3: 30_000, 4: 0 };
 
 // ============================================================================
 // HYSTERESIS
@@ -119,7 +118,7 @@ export function readPanicState(directory: string): PanicState {
     // Session hard reset: zombie state from a previous session must not leak
     if (parsed.updatedAt) {
       const age = Date.now() - new Date(parsed.updatedAt).getTime();
-      if (age > SESSION_EXPIRY_MS) return defaultPanicState();
+      if (age > PANIC_SESSION_EXPIRY_MS) return defaultPanicState();
     }
 
     return { ...defaultPanicState(), ...parsed, schemaVersion: 1 };
@@ -161,10 +160,6 @@ const DIRECTIVE_MESSAGES: Record<PanicLevel, string> = {
   2: '[PANIC:PLANNING:DIRECTIVE] Previous checkpoint ignored. Stop. Run orient() now before proceeding.',
   3: '[PANIC:SCOPE:DIRECTIVE] Scope reduction warning ignored. Stop all cross-module writes. Call orient() immediately.',
   4: '[PANIC:CRITICAL] Critical epistemic instability. Call orient() before further modifications.',
-};
-
-const SEVERITY_MAP: Record<PanicLevel, PanicCheckOutput['severity']> = {
-  0: undefined, 1: 'elevated', 2: 'panic', 3: 'scope', 4: 'critical',
 };
 
 /**

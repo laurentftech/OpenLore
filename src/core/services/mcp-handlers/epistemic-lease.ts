@@ -36,6 +36,18 @@ import {
 import { emit } from '../telemetry.js';
 import { applyPanicHysteresis } from './panic-response.js';
 import type { PanicLevel, PanicState } from './panic-response.js';
+import {
+  PANIC_SCORE_MAX,
+  PANIC_TRAJECTORY_DENSITY,
+  PANIC_TRAJECTORY_DELTA,
+  PANIC_OSCILLATION_THRESHOLD,
+  PANIC_OSCILLATION_DELTA,
+  PANIC_STALE_D3_LOCALITY_GATE,
+  PANIC_STALE_D3_DELTA,
+  PANIC_LOCALITY_RECOVERY,
+  PANIC_DECAY_PER_MIN,
+  PANIC_REFRACTORY_MS,
+} from './panic-constants.js';
 
 // ============================================================================
 // TYPES
@@ -179,13 +191,7 @@ const BURST_TOOL_WEIGHT_THRESHOLD   = 8;     // tool weight for post-stale burst
 
 // Panic constants
 const RAPID_ORIENT_INTERVAL_MS      = 2 * 60 * 1000;  // orients within 2min are "rapid"
-const PANIC_SCORE_MAX               = 100;
-// Spec-correct panic signal thresholds
-const PANIC_TRAJECTORY_DENSITY      = 0.60;  // trajectory burst → +15
-const PANIC_OSCILLATION_THRESHOLD   = 0.50;  // oscillation spike → +10
-const PANIC_DECAY_PER_MIN           = 5;     // passive wall-clock decay
-const PANIC_LOCALITY_RECOVERY       = 3;     // per-call recovery when stable
-const PANIC_REFRACTORY_MS           = 45_000; // post-orient suppression window (45s)
+// Panic signal thresholds and weights imported from panic-constants.ts
 
 // ============================================================================
 // PANIC UPDATE
@@ -226,19 +232,19 @@ export function updatePanic(
   // Upward signals — suppressed during refractory period after orient() recovery
   if (!inRefractory) {
     if (density >= PANIC_TRAJECTORY_DENSITY) {
-      const d = 15;
+      const d = PANIC_TRAJECTORY_DELTA;
       delta += d;
       provenance.push({ name: 'trajectory_burst', delta: d, evidence: { density } });
     }
     if (oscillation >= PANIC_OSCILLATION_THRESHOLD) {
-      const d = 10;
+      const d = PANIC_OSCILLATION_DELTA;
       delta += d;
       provenance.push({ name: 'oscillation_spike', delta: d, evidence: { oscillation } });
     }
     // stale_depth_3 signal gated by localityConfidence: a stale agent doing focused local
     // work (high confidence) is much less risky than a stale agent in behavioral drift.
-    if (staleDepth >= 3 && localityConfidence < 0.5) {
-      const d = 25;
+    if (staleDepth >= 3 && localityConfidence < PANIC_STALE_D3_LOCALITY_GATE) {
+      const d = PANIC_STALE_D3_DELTA;
       delta += d;
       provenance.push({ name: 'stale_depth_3', delta: d, evidence: { stale_depth: staleDepth, locality_confidence: localityConfidence } });
     }
@@ -571,7 +577,7 @@ export function updateTracker(
     // Gated by localityConfidence: a stale agent doing focused local work is not bursting.
     // High confidence (≥0.5) suppresses burst escalation — only clear behavioral drift triggers it.
     const isBurst = weight >= BURST_TOOL_WEIGHT_THRESHOLD || density >= BURST_DENSITY_THRESHOLD;
-    if (tracker.staleDepth < 3 && isBurst && tracker.localityConfidence < 0.5) {
+    if (tracker.staleDepth < 3 && isBurst && tracker.localityConfidence < PANIC_STALE_D3_LOCALITY_GATE) {
       emit(directory, 'epistemic-lease', {
         event: 'depth_escalate', from_depth: tracker.staleDepth, to_depth: 3,
         tool: toolName, module: mod, cognitive_load: tracker.cognitiveLoad,
