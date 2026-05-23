@@ -102,5 +102,5 @@ function formatOutput(output: ReturnType<typeof buildPanicCheckOutput>, format: 
 
   // kilo: plain-text message (some runtimes just want a string signal)
   if (output.decision === 'allow') return '';
-  return `[PANIC:${output.severity?.toUpperCase() ?? 'WARN'}] ${output.message ?? 'Destabilization detected — call orient().'}`;
+  return output.message ?? `[PANIC:${output.severity?.toUpperCase() ?? 'WARN'}] Destabilization detected — call orient().`;
 }

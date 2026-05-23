@@ -1360,9 +1360,6 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         trackerDir = directory;
         const cfg = await readOpenLoreConfig(directory);
         panicPolicy = cfg?.panicResponse?.mode ?? 'off';
-        if (panicPolicy !== 'off') {
-          emit(directory, 'panic-response', { event: 'panic_mode_active', mode: panicPolicy });
-        }
       }
       // Update epistemic state before dispatch (orient resets tracker internally).
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
