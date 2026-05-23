@@ -97,6 +97,8 @@ export interface EpistemicTracker {
   panicTriggers: string[];
   /** Epoch ms — upward panic signals suppressed until this time after orient() recovery. */
   panicRecoverySuppressionUntil: number;
+  /** Revision of the last panic-state.json write (from MCP or Gryph sync). Used for CAS monotonicity. */
+  panicRevision: number;
 }
 
 // ============================================================================
@@ -455,6 +457,7 @@ export function createTracker(directory: string): EpistemicTracker {
     lastPanicUpdateAt: 0,
     panicTriggers: [],
     panicRecoverySuppressionUntil: 0,
+    panicRevision: 0,
   };
 }
 
@@ -767,5 +770,6 @@ export function trackerToPanicState(tracker: EpistemicTracker, agentId?: string,
       : undefined,
     agentId,
     sessionId,
+    revision: tracker.panicRevision,
   };
 }

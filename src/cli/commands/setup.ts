@@ -37,6 +37,7 @@ interface ClaudeHookSettings {
   hooks?: {
     PreToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
     PostToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
+    UserPromptSubmit?: Array<{ _comment?: string; [key: string]: unknown }>;
     [key: string]: unknown;
   };
   [key: string]: unknown;
@@ -68,6 +69,40 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
   await mkdir(join(rootPath, '.claude'), { recursive: true });
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
   logger.success(`panic-check PreToolUse hook added to .claude/settings.json (format: ${format})`);
+}
+
+// ============================================================================
+// GRYPH WATCH HOOK
+// Installs openlore gryph-watch as a UserPromptSubmit hook — starts the
+// background Gryph observer once per session, decoupled from MCP tool calls.
+// ============================================================================
+
+const GRYPH_WATCH_HOOK_MARKER = 'openlore gryph-watch';
+
+export async function installGryphWatchHook(rootPath: string): Promise<void> {
+  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  let settings: ClaudeHookSettings = {};
+  try {
+    settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as ClaudeHookSettings;
+  } catch { /* start fresh */ }
+
+  const hooks = settings.hooks?.UserPromptSubmit ?? [];
+  if (hooks.some((h) => JSON.stringify(h).includes(GRYPH_WATCH_HOOK_MARKER))) {
+    logger.success('gryph-watch UserPromptSubmit hook already present in .claude/settings.json');
+    return;
+  }
+
+  const hookEntry = {
+    _comment: 'openlore: start Gryph behavioral observer (singleton, background)',
+    type: 'command',
+    command: 'openlore gryph-watch &',
+  };
+  settings.hooks ??= {};
+  settings.hooks.UserPromptSubmit = [...hooks, hookEntry];
+
+  await mkdir(join(rootPath, '.claude'), { recursive: true });
+  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  logger.success('gryph-watch UserPromptSubmit hook added to .claude/settings.json');
 }
 
 // ============================================================================
@@ -338,6 +373,35 @@ export const setupCommand = new Command('setup')
     const projectRoot = options.dir;
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa'];
 
+    // If only flag options (no tool install needed), run them and exit early
+    if (!options.tools && (options.hooks || options.panic) && !process.stdout.isTTY) {
+      if (options.hooks) {
+        const validFormats = ['claude', 'kilo', 'codex'];
+        const fmt = validFormats.includes(options.hooks) ? options.hooks : 'claude';
+        if (!validFormats.includes(options.hooks)) {
+          logger.warning(`Unknown hooks format "${options.hooks}" — defaulting to "claude"`);
+        }
+        await installPanicCheckHook(projectRoot, fmt);
+        await installGryphWatchHook(projectRoot);
+      }
+      if (options.panic !== undefined) {
+        const validModes: PanicResponseMode[] = ['off', 'observe', 'advisory', 'experimental_blocking'];
+        if (!validModes.includes(options.panic as PanicResponseMode)) {
+          logger.error(`Unknown panic mode "${options.panic}". Valid: ${validModes.join(', ')}`);
+        } else {
+          const cfg = await readOpenLoreConfig(projectRoot);
+          if (!cfg) {
+            logger.warning('No .openlore/config.json found — run openlore init first.');
+          } else {
+            cfg.panicResponse = { mode: options.panic as PanicResponseMode };
+            await writeOpenLoreConfig(projectRoot, cfg);
+            logger.success(`panic response mode set to "${options.panic}"`);
+          }
+        }
+      }
+      process.exit(0);
+    }
+
     let tools: ToolName[];
     if (options.tools) {
       tools = (options.tools.split(',').map((t) => t.trim()) as ToolName[]).filter((t) =>
@@ -427,6 +491,7 @@ export const setupCommand = new Command('setup')
         logger.warning(`Unknown hooks format "${options.hooks}" — defaulting to "claude"`);
       }
       await installPanicCheckHook(projectRoot, fmt);
+      await installGryphWatchHook(projectRoot);
     }
 
     // --panic flag: update panicResponse.mode in .openlore/config.json

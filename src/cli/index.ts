@@ -26,6 +26,7 @@ import { digestCommand } from './commands/digest.js';
 import { decisionsCommand } from './commands/decisions.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { panicCheckCommand } from './commands/panic-check.js';
+import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { configureLogger } from '../utils/logger.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
@@ -137,5 +138,6 @@ program.addCommand(digestCommand);
 program.addCommand(decisionsCommand);
 program.addCommand(telemetryCommand);
 program.addCommand(panicCheckCommand);
+program.addCommand(gryphWatchCommand);
 
 program.parse();

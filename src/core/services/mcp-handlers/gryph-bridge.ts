@@ -21,7 +21,7 @@
 
 import { spawnSync, spawn } from 'node:child_process';
 import { emit } from '../telemetry.js';
-import { readPanicState, writePanicState, applyPanicHysteresis } from './panic-response.js';
+import { readPanicState, writePanicState, casWritePanicState, applyPanicHysteresis } from './panic-response.js';
 import type { PanicState, PanicLevel } from './panic-response.js';
 import type { EpistemicTracker } from './epistemic-lease.js';
 import {
@@ -277,18 +277,26 @@ export interface GryphPollingOptions {
   provider?: RuntimeBehaviorProvider;
 }
 
+/** One active poller per workspace directory — enforced by startGryphPolling. */
+const _pollerRegistry = new Map<string, () => void>();
+
 /**
  * Start background Gryph polling. Returns a cleanup function (call on shutdown).
  *
  * Invariants:
+ * - One per workspace: registry stops any existing poller for the same directory
  * - Never overlaps: single-flight protection skips polls while previous is running
  * - Never blocks: async spawn, isolated from MCP execution path
  * - Never throws: all errors caught, fail-open
- * - Syncs tracker: panicScore/panicLevel updated in-memory after file write so
- *   the MCP path doesn't overwrite Gryph-elevated state on the next tool call
+ * - CAS writes: uses compare-and-swap to prevent overwriting concurrent MCP writes
+ * - Syncs tracker: panicScore/panicLevel/panicRevision updated in-memory after write
+ *   so the MCP path doesn't overwrite Gryph-elevated state on the next tool call
  */
 export function startGryphPolling(opts: GryphPollingOptions): () => void {
   const { directory, getTracker, provider = new GryphBehaviorProvider() } = opts;
+
+  // Enforce one-per-workspace: stop any existing poller for this directory
+  _pollerRegistry.get(directory)?.();
 
   const intervalMs = Math.max(
     GRYPH_POLL_INTERVAL_MIN_MS,
@@ -297,6 +305,7 @@ export function startGryphPolling(opts: GryphPollingOptions): () => void {
 
   let isPolling = false;
   let lastPollAt = new Date(Date.now() - intervalMs).toISOString();
+  let stopped = false;
 
   const poll = async (): Promise<void> => {
     if (isPolling) return;
@@ -318,38 +327,51 @@ export function startGryphPolling(opts: GryphPollingOptions): () => void {
       // No actionable signals — skip state update
       if (!snapshot.repetitiveRetryBurst && !snapshot.largePatchWhileStale) return;
 
-      const state = readPanicState(directory);
       const tracker = getTracker();
       const staleDepth = tracker?.staleDepth ?? 0;
 
-      const { newScore, newLevel, provenance } = applySnapshotDelta(snapshot, state, staleDepth);
-      if (newScore === state.panicScore && newLevel === state.panicLevel) return;
+      // CAS write with one retry on conflict (MCP may write between our read and write).
+      // All ops inside casWritePanicState are synchronous — atomic within the Node.js event loop.
+      let readState = readPanicState(directory);
+      let applyResult = applySnapshotDelta(snapshot, readState, staleDepth);
+      if (applyResult.newScore === readState.panicScore && applyResult.newLevel === readState.panicLevel) return;
 
-      const updatedState: PanicState = {
-        ...state,
-        panicScore: newScore,
-        panicLevel: newLevel,
-        updatedAt: new Date().toISOString(),
-        triggers: [...(state.triggers ?? []), ...provenance.map(p => p.name)],
-      };
-      writePanicState(directory, updatedState);
-
-      // Sync in-memory tracker so MCP path doesn't overwrite with stale score
-      if (tracker) {
-        tracker.panicScore = newScore;
-        tracker.panicLevel = newLevel as PanicLevel;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const candidate: PanicState = {
+          ...readState,
+          panicScore: applyResult.newScore,
+          panicLevel: applyResult.newLevel,
+          updatedAt: new Date().toISOString(),
+          triggers: [...(readState.triggers ?? []), ...applyResult.provenance.map(p => p.name)],
+        };
+        if (casWritePanicState(directory, readState.revision, candidate)) {
+          const writtenRevision = readState.revision + 1;
+          // Sync in-memory tracker so MCP path doesn't overwrite with stale state
+          if (tracker) {
+            tracker.panicScore = applyResult.newScore;
+            tracker.panicLevel = applyResult.newLevel as PanicLevel;
+            tracker.panicRevision = writtenRevision;
+          }
+          emit(directory, 'panic', {
+            event: 'panic_score_delta',
+            source: 'gryph',
+            delta: applyResult.newScore - readState.panicScore,
+            from_score: readState.panicScore,
+            to_score: applyResult.newScore,
+            from_level: readState.panicLevel,
+            to_level: applyResult.newLevel,
+            provenance: applyResult.provenance,
+          });
+          return;
+        }
+        // Conflict on first attempt — re-read and retry once
+        if (attempt === 0) {
+          readState = readPanicState(directory);
+          applyResult = applySnapshotDelta(snapshot, readState, staleDepth);
+          if (applyResult.newScore === readState.panicScore && applyResult.newLevel === readState.panicLevel) return;
+        }
       }
-
-      emit(directory, 'panic', {
-        event: 'panic_score_delta',
-        source: 'gryph',
-        delta: newScore - state.panicScore,
-        from_score: state.panicScore,
-        to_score: newScore,
-        from_level: state.panicLevel,
-        to_level: newLevel,
-        provenance,
-      });
+      // Both CAS attempts failed — skip this poll cycle, try again next interval
     } catch {
       // fail-open: no error propagates
     } finally {
@@ -357,8 +379,22 @@ export function startGryphPolling(opts: GryphPollingOptions): () => void {
     }
   };
 
-  const handle = setInterval(() => { void poll(); }, intervalMs);
-  return () => clearInterval(handle);
+  // While loop: sleep-before-poll preserves "first poll after one interval" semantics.
+  // Sequential await eliminates setInterval's timer drift and stop lifecycle races.
+  const run = async (): Promise<void> => {
+    while (!stopped) {
+      await new Promise<void>(r => setTimeout(r, intervalMs));
+      if (!stopped) await poll();
+    }
+  };
+  void run();
+
+  const stop = (): void => {
+    stopped = true;
+    _pollerRegistry.delete(directory);
+  };
+  _pollerRegistry.set(directory, stop);
+  return stop;
 }
 
 // ============================================================================

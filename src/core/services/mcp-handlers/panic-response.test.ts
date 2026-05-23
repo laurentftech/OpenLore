@@ -15,6 +15,7 @@ import {
   defaultPanicState,
   readPanicState,
   writePanicState,
+  casWritePanicState,
   buildPanicCheckOutput,
   getPanicSignalText,
 } from './panic-response.js';

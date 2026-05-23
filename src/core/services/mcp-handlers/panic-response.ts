@@ -41,6 +41,8 @@ export interface PanicState {
   panicRecoverySuppressionUntil?: string;
   agentId?: string;
   sessionId?: string;
+  /** Monotonically increasing write counter. Used for CAS by concurrent writers (Gryph poll vs MCP). */
+  revision: number;
 }
 
 export interface PanicCheckOutput {
@@ -98,6 +100,7 @@ export function defaultPanicState(): PanicState {
     localityConfidence: 0,
     interventionCountSinceStable: 0,
     triggers: [],
+    revision: 0,
   };
 }
 
@@ -121,7 +124,7 @@ export function readPanicState(directory: string): PanicState {
       if (age > PANIC_SESSION_EXPIRY_MS) return defaultPanicState();
     }
 
-    return { ...defaultPanicState(), ...parsed, schemaVersion: 1 };
+    return { ...defaultPanicState(), ...parsed, schemaVersion: 1, revision: parsed.revision ?? 0 };
   } catch {
     return defaultPanicState();
   }
@@ -129,16 +132,50 @@ export function readPanicState(directory: string): PanicState {
 
 /**
  * Atomically writes panic state. POSIX rename(2) is atomic on same filesystem.
+ * Bumps revision on every write — callers sync their own revision counter from the return value.
  * Never throws — must not crash the hot path.
+ * Returns the new revision written (or the existing revision if write failed).
  */
-export function writePanicState(directory: string, state: PanicState): void {
+export function writePanicState(directory: string, state: PanicState): number {
+  const newRevision = (state.revision ?? 0) + 1;
   try {
     const path = join(directory, OPENLORE_DIR, PANIC_STATE_FILE);
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf-8');
+    writeFileSync(tmp, JSON.stringify({ ...state, revision: newRevision }, null, 2), 'utf-8');
     renameSync(tmp, path);
+    return newRevision;
   } catch {
     // never crash the hot path
+    return state.revision ?? 0;
+  }
+}
+
+/**
+ * Compare-and-swap write for concurrent writers (Gryph poll path).
+ * All ops are synchronous — no await between read and write — so this is atomic
+ * within the Node.js event loop (no interleaving at JS level).
+ * Returns false if on-disk revision !== expectedRevision (stale read → caller retries).
+ */
+export function casWritePanicState(
+  directory: string,
+  expectedRevision: number,
+  state: PanicState,
+): boolean {
+  try {
+    const path = join(directory, OPENLORE_DIR, PANIC_STATE_FILE);
+    const currentRevision = existsSync(path)
+      ? (() => {
+          try { return (JSON.parse(readFileSync(path, 'utf-8')) as Partial<PanicState>).revision ?? 0; }
+          catch { return 0; }
+        })()
+      : 0;
+    if (currentRevision !== expectedRevision) return false;
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ ...state, revision: expectedRevision + 1 }, null, 2), 'utf-8');
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    return false;
   }
 }
 

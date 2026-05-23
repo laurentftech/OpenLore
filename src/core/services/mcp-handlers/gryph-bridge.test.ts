@@ -48,6 +48,7 @@ function makeTracker(overrides: Partial<EpistemicTracker> = {}): EpistemicTracke
     lastPanicUpdateAt: 0,
     panicTriggers: [],
     panicRecoverySuppressionUntil: 0,
+    panicRevision: 0,
     ...overrides,
   } as EpistemicTracker;
 }
