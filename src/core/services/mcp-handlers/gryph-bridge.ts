@@ -33,6 +33,7 @@ import {
   GRYPH_LARGE_PATCH_LOC_THRESHOLD,
   GRYPH_ENTROPY_LOW_THRESHOLD,
   GRYPH_ENTROPY_HIGH_THRESHOLD,
+  GRYPH_FAILING_RATE_THRESHOLD,
   GRYPH_POLL_INTERVAL_MS,
   GRYPH_POLL_INTERVAL_MIN_MS,
 } from './panic-constants.js';
@@ -66,17 +67,26 @@ export interface GryphSignals {
 }
 
 interface GryphExecEvent {
-  timestamp?: string;
-  action?: string;
+  // PascalCase — actual Gryph schema
+  Command?: string;
+  ExitCode?: number;
+  ResultStatus?: string;
+  Timestamp?: string;
+  // snake_case / camelCase — kept for custom/future sources
   command?: string;
   cmd?: string;
   exit_code?: number;
   exitCode?: number;
+  result_status?: string;
 }
 
 interface GryphWriteEvent {
-  timestamp?: string;
-  action?: string;
+  // PascalCase — actual Gryph schema
+  Path?: string;
+  LinesAdded?: number;
+  LinesRemoved?: number;
+  Timestamp?: string;
+  // snake_case / camelCase — kept for custom/future sources
   path?: string;
   file?: string;
   lines?: number;
@@ -256,16 +266,24 @@ export class GryphBehaviorProvider implements RuntimeBehaviorProvider {
       ]);
 
       const commands = (execEvents as GryphExecEvent[])
-        .map(e => e.command ?? e.cmd ?? '')
+        .map(e => e.Command ?? e.command ?? e.cmd ?? '')
         .filter(Boolean);
       const commandEntropy = computeCommandEntropy(commands);
 
       const failingCount = (execEvents as GryphExecEvent[])
-        .filter(e => (e.exit_code ?? e.exitCode ?? 0) !== 0).length;
+        .filter(e => {
+          const status = e.ResultStatus ?? e.result_status;
+          return status === 'error' || (e.ExitCode ?? e.exit_code ?? e.exitCode ?? 0) !== 0;
+        }).length;
       const failingCommandRate = execEvents.length > 0 ? failingCount / execEvents.length : 0;
-      const repetitiveRetryBurst = commandEntropy < GRYPH_ENTROPY_LOW_THRESHOLD && failingCount > 0;
+      // Low entropy + any failure (pure retry loop) OR high failure rate regardless of entropy
+      const repetitiveRetryBurst =
+        (commandEntropy < GRYPH_ENTROPY_LOW_THRESHOLD && failingCount > 0) ||
+        failingCommandRate > GRYPH_FAILING_RATE_THRESHOLD;
 
-      const locs = (writeEvents as GryphWriteEvent[]).map(e => e.lines ?? e.loc ?? e.additions ?? 0);
+      const locs = (writeEvents as GryphWriteEvent[]).map(
+        e => e.LinesAdded ?? e.lines ?? e.loc ?? e.additions ?? 0,
+      );
       const maxLoc = locs.length > 0 ? Math.max(...locs) : 0;
 
       return {
@@ -432,12 +450,15 @@ export function queryGryphSignals(since: string): GryphSignals | null {
     const execEvents = queryGryphSync('exec', since) as GryphExecEvent[];
     const writeEvents = queryGryphSync('write', since) as GryphWriteEvent[];
 
-    const commands = execEvents.map(e => e.command ?? e.cmd ?? '').filter(Boolean);
+    const commands = execEvents.map(e => e.Command ?? e.command ?? e.cmd ?? '').filter(Boolean);
     const commandEntropy = computeCommandEntropy(commands);
-    const hasFailures = execEvents.some(e => (e.exit_code ?? e.exitCode ?? 0) !== 0);
+    const hasFailures = execEvents.some(e => {
+      const status = e.ResultStatus ?? e.result_status;
+      return status === 'error' || (e.ExitCode ?? e.exit_code ?? e.exitCode ?? 0) !== 0;
+    });
     const repetitiveRetryBurst = commandEntropy < GRYPH_ENTROPY_LOW_THRESHOLD && hasFailures;
 
-    const locs = writeEvents.map(e => e.lines ?? e.loc ?? e.additions ?? 0);
+    const locs = writeEvents.map(e => e.LinesAdded ?? e.lines ?? e.loc ?? e.additions ?? 0);
     const largePatchLoc = locs.length > 0 ? Math.max(...locs) : 0;
     const largePatchWhileStale = largePatchLoc > GRYPH_LARGE_PATCH_LOC_THRESHOLD;
 

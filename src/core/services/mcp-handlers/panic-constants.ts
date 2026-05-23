@@ -104,6 +104,9 @@ export const GRYPH_ENTROPY_LOW_THRESHOLD = 0.30;
 /** Command entropy above this = deliberate exploratory work (attenuation gate). */
 export const GRYPH_ENTROPY_HIGH_THRESHOLD = 0.60;
 
+/** Failure rate above this triggers burst signal regardless of entropy (mixed-window robustness). */
+export const GRYPH_FAILING_RATE_THRESHOLD = 0.30;
+
 // ============================================================================
 // GRYPH POLLING
 // ============================================================================
