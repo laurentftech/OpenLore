@@ -20,6 +20,7 @@
  */
 
 import { spawnSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { emit } from '../telemetry.js';
 import { readPanicState, writePanicState, casWritePanicState, applyPanicHysteresis } from './panic-response.js';
 import type { PanicState, PanicLevel } from './panic-response.js';
@@ -122,15 +123,34 @@ function computeCommandEntropy(commands: string[]): number {
 // ============================================================================
 
 let _gryphAvailable: boolean | undefined;
+let _gryphBin = 'gryph';
 
 function isGryphAvailable(): boolean {
   if (_gryphAvailable !== undefined) return _gryphAvailable;
+  // Try PATH-resolution first (fast, works in interactive shells)
   const result = spawnSync('which', ['gryph'], {
     timeout: GRYPH_DETECT_TIMEOUT_MS,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
-  _gryphAvailable = result.status === 0 && Boolean(result.stdout?.toString().trim());
-  return _gryphAvailable;
+  const fromPath = result.status === 0 ? result.stdout?.toString().trim() : '';
+  if (fromPath) {
+    _gryphBin = fromPath;
+    _gryphAvailable = true;
+    return true;
+  }
+  // Fallback: check common install locations (hook environments often have restricted PATH)
+  const home = process.env['HOME'] ?? '';
+  const candidates = [
+    `${home}/.local/bin/gryph`,
+    `${home}/go/bin/gryph`,
+    '/usr/local/bin/gryph',
+    '/opt/homebrew/bin/gryph',
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) { _gryphBin = p; _gryphAvailable = true; return true; }
+  }
+  _gryphAvailable = false;
+  return false;
 }
 
 // ============================================================================
@@ -140,7 +160,7 @@ function isGryphAvailable(): boolean {
 /** Synchronous query — used by the backward-compat panic-check enrichment path. */
 function queryGryphSync(action: 'exec' | 'write', since: string): unknown[] {
   const result = spawnSync(
-    'gryph',
+    _gryphBin,
     ['query', '--format', 'json', '--action', action, '--since', since],
     { timeout: GRYPH_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf-8' },
   );
@@ -157,7 +177,7 @@ function queryGryphSync(action: 'exec' | 'write', since: string): unknown[] {
 async function queryGryphAsync(action: 'exec' | 'write', since: string): Promise<unknown[]> {
   return new Promise((resolve) => {
     const child = spawn(
-      'gryph',
+      _gryphBin,
       ['query', '--format', 'json', '--action', action, '--since', since],
       { stdio: ['ignore', 'pipe', 'ignore'] },
     );
