@@ -34,7 +34,7 @@ import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-han
 import { createTracker, updateTracker, updatePanic, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { PanicResponseMode } from '../../types/index.js';
-import { writePanicState, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
+import { readPanicState, writePanicState, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
@@ -1366,17 +1366,41 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // telemetry) are separate processes that read state but never call updateTracker —
       // no recursive panic feedback loop from openlore internal commands.
       if (tracker && directory) {
+        const prevOrientResetAt = tracker.lastOrientResetAt;
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
+        const orientJustFired = tracker.lastOrientResetAt !== prevOrientResetAt;
+
         if (panicPolicy !== 'off') {
+          // Read disk state to preserve hook-written fields (lastHookInterventionAt, gryphWindowStart)
+          // that panic-check (separate process) may have set since the last MCP write.
+          const diskState = readPanicState(directory);
           updatePanic(tracker, {
             density: tracker.density,
             oscillation: tracker.oscillation,
-            weight: 1,  // weight read from TOOL_WEIGHTS inside updatePanic via opts — set baseline here
+            weight: 1,
             staleDepth: tracker.staleDepth,
             directory,
             tool: name,
           });
-          tracker.panicRevision = writePanicState(directory, trackerToPanicState(tracker, agentName));
+          const stateToWrite = {
+            ...trackerToPanicState(tracker, agentName),
+            lastHookInterventionAt: diskState.lastHookInterventionAt,
+            gryphWindowStart: diskState.gryphWindowStart,
+          };
+          tracker.panicRevision = writePanicState(directory, stateToWrite);
+
+          // Feedback loop: did orient() respond to a prior hook intervention?
+          if (orientJustFired && diskState.lastHookInterventionAt) {
+            const lagMs = Date.now() - new Date(diskState.lastHookInterventionAt).getTime();
+            if (lagMs < 5 * 60 * 1000) {
+              emit(directory, 'panic', {
+                event: 'panic_intervention_outcome',
+                outcome: 'responded',
+                intervention_lag_ms: lagMs,
+                orient_kind: tracker.recentOrientCount >= 3 ? 'spam' : tracker.recentOrientCount >= 2 ? 'rapid' : 'normal',
+              });
+            }
+          }
         }
       }
 

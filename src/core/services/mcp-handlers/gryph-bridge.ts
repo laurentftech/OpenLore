@@ -34,6 +34,7 @@ import {
   GRYPH_ENTROPY_LOW_THRESHOLD,
   GRYPH_ENTROPY_HIGH_THRESHOLD,
   GRYPH_FAILING_RATE_THRESHOLD,
+  PANIC_DECAY_PER_MIN,
   GRYPH_POLL_INTERVAL_MS,
   GRYPH_POLL_INTERVAL_MIN_MS,
 } from './panic-constants.js';
@@ -135,6 +136,12 @@ function computeCommandEntropy(commands: string[]): number {
 let _gryphAvailable: boolean | undefined;
 let _gryphBin = 'gryph';
 
+/** Reset availability cache — for testing only. */
+export function _resetGryphAvailabilityForTesting(available = false): void {
+  _gryphAvailable = available;
+  _gryphBin = 'gryph';
+}
+
 function isGryphAvailable(): boolean {
   if (_gryphAvailable !== undefined) return _gryphAvailable;
   // Try PATH-resolution first (fast, works in interactive shells)
@@ -217,8 +224,18 @@ function applySnapshotDelta(
   state: PanicState,
   staleDepth: number,
 ): SnapshotDeltaResult {
-  let delta = 0;
+  const now = Date.now();
+  const elapsedMin = state.updatedAt
+    ? Math.max(0, (now - new Date(state.updatedAt).getTime()) / 60_000)
+    : 0;
+  const decayDelta = -Math.floor(elapsedMin * PANIC_DECAY_PER_MIN);
+
+  let delta = decayDelta;
   const provenance: SnapshotDeltaResult['provenance'] = [];
+  if (decayDelta < 0) {
+    provenance.push({ name: 'passive_decay', delta: decayDelta, evidence: { elapsed_min: Math.round(elapsedMin * 100) / 100 } });
+  }
+
   const isStale = staleDepth >= 2;
 
   if (snapshot.repetitiveRetryBurst) {
@@ -242,8 +259,8 @@ function applySnapshotDelta(
     });
   }
 
-  if (delta === 0) {
-    return { newScore: state.panicScore, newLevel: state.panicLevel, provenance };
+  if (delta === 0 || (delta === decayDelta && state.panicScore === 0)) {
+    return { newScore: state.panicScore, newLevel: state.panicLevel, provenance: [] };
   }
 
   const newScore = Math.min(PANIC_SCORE_MAX, Math.max(0, state.panicScore + delta));

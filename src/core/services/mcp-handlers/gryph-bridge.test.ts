@@ -14,6 +14,7 @@ import {
   startGryphPolling,
   applyGryphDelta,
   queryGryphSignals,
+  _resetGryphAvailabilityForTesting,
 } from './gryph-bridge.js';
 import type { RuntimeBehaviorProvider, RuntimeBehaviorSnapshot } from './gryph-bridge.js';
 import { readPanicState, writePanicState, defaultPanicState } from './panic-response.js';
@@ -23,6 +24,7 @@ import {
   GRYPH_LARGE_PATCH_LOW_ENTROPY_DELTA,
   GRYPH_LARGE_PATCH_HIGH_ENTROPY_DELTA,
   GRYPH_POLL_INTERVAL_MS,
+  PANIC_DECAY_PER_MIN,
 } from './panic-constants.js';
 
 // ============================================================================
@@ -146,7 +148,7 @@ describe('GryphBehaviorProvider', () => {
 
 describe('queryGryphSignals', () => {
   it('returns null when gryph unavailable', () => {
-    // No mock needed — gryph is not installed in test env
+    _resetGryphAvailabilityForTesting(false);
     const result = queryGryphSignals(new Date().toISOString());
     expect(result).toBeNull();
   });
@@ -364,8 +366,11 @@ describe('startGryphPolling', () => {
     await vi.advanceTimersByTimeAsync(GRYPH_POLL_INTERVAL_MS);
     stop();
 
+    // Second poll applies decay for time elapsed since first poll (GRYPH_POLL_INTERVAL_MS).
+    const decayPerPoll = Math.floor((GRYPH_POLL_INTERVAL_MS / 60_000) * PANIC_DECAY_PER_MIN);
+    const expected = GRYPH_RETRY_BURST_DELTA * 2 - decayPerPoll;
     const state = readPanicState(dir);
-    expect(state.panicScore).toBe(GRYPH_RETRY_BURST_DELTA * 2);
-    expect(tracker.panicScore).toBe(GRYPH_RETRY_BURST_DELTA * 2);
+    expect(state.panicScore).toBe(expected);
+    expect(tracker.panicScore).toBe(expected);
   });
 });

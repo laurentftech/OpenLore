@@ -37,8 +37,8 @@ export const panicCheckCommand = new Command('panic-check')
 
       let state = readPanicState(dir);
 
-      // Gryph enrichment — fail-open, query from lastOrientAt (or 15min ago if absent)
-      const since = state.lastOrientAt ?? new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      // Gryph enrichment — query from gryphWindowStart (2-min fallback avoids replaying hours of history)
+      const since = state.gryphWindowStart ?? new Date(Date.now() - 2 * 60 * 1000).toISOString();
       const gryphSignals = queryGryphSignals(since);
       if (gryphSignals) {
         const enrichedTriggers = [...state.triggers];
@@ -61,9 +61,11 @@ export const panicCheckCommand = new Command('panic-check')
 
       if (output.decision === 'warn') {
         const newCount = state.interventionCountSinceStable + 1;
+        const now = new Date().toISOString();
         writePanicState(dir, {
           ...state,
-          lastHookInterventionAt: new Date().toISOString(),
+          lastHookInterventionAt: now,
+          gryphWindowStart: now,
           interventionCountSinceStable: newCount,
         });
         emit(dir, 'panic', {

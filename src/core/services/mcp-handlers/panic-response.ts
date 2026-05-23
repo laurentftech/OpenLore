@@ -39,6 +39,8 @@ export interface PanicState {
   triggers: string[];
   /** ISO — upward signals suppressed until this timestamp after an orient() recovery. */
   panicRecoverySuppressionUntil?: string;
+  /** ISO — start of the Gryph query window for the panic-check hook path. Advanced on each intervention write. */
+  gryphWindowStart?: string;
   agentId?: string;
   sessionId?: string;
   /** Monotonically increasing write counter. Used for CAS by concurrent writers (Gryph poll vs MCP). */
