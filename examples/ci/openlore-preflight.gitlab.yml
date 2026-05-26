@@ -1,0 +1,16 @@
+# OpenLore preflight — GitLab CI
+# Include this in .gitlab-ci.yml as a stand-alone job. Fails the merge request
+# if the persisted OpenLore graph is stale relative to the files this MR
+# changed. GitLab provides CI_MERGE_REQUEST_TARGET_BRANCH_NAME for merge
+# request pipelines; we resolve it to a full ref before running preflight.
+
+openlore-preflight:
+  stage: test
+  image: node:22
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - npx --yes openlore preflight --since "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"

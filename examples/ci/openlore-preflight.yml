@@ -1,0 +1,30 @@
+# OpenLore preflight — GitHub Actions
+# Fails the PR if the persisted OpenLore graph is stale relative to the
+# files this PR changed. Drop this in as `.github/workflows/openlore-preflight.yml`.
+#
+# Exit codes: 0 = fresh, 1 = stale (PR fails), 2 = error.
+
+name: OpenLore preflight
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: openlore preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git diff origin/<base>...HEAD` can see the merge base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run openlore preflight
+        run: npx --yes openlore preflight --since origin/${{ github.base_ref }}
