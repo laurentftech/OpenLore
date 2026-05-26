@@ -146,6 +146,22 @@ One graph query replaces most exploratory file reads. The agent knows exactly wh
 
 ---
 
+## Use OpenLore as a Claude Code Skill
+
+OpenLore ships a canonical [Claude Code Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/). Install it once and Claude Code will automatically call `orient()` at the start of every task — no `CLAUDE.md` editing required.
+
+```sh
+# From the OpenLore repo root:
+npm run skill:install-local           # → ~/.claude/skills/openlore-orient/
+
+# Or copy into a single project's .claude/skills/:
+cp -R skills/openlore-orient /path/to/your-project/.claude/skills/
+```
+
+The skill bundle ships a `SKILL.md` manifest, POSIX + PowerShell wrappers, a worked example, and a redacted real `orient()` JSON output so the model knows the response shape. See [`skills/openlore-orient/README.md`](skills/openlore-orient/README.md) for details.
+
+---
+
 ## Core Features
 
 **Analyze** (no API key)

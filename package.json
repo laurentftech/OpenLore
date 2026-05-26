@@ -35,6 +35,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist coverage",
+    "skill:install-local": "node scripts/install-skill.js",
     "format": "eslint src --fix",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
