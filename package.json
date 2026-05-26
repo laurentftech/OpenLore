@@ -26,6 +26,7 @@
     "start": "node dist/cli/index.js",
     "view": "tsx src/cli/index.ts view",
     "bench": "tsx scripts/bench.ts",
+    "bench:mcp": "tsx scripts/bench-mcp.ts",
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
