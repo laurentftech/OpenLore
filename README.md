@@ -65,8 +65,11 @@ npm install -g openlore
 cd /path/to/your-project
 
 openlore analyze          # build call graph, clusters, CODEBASE.md
+openlore install          # auto-configure your agent (Claude Code, Cursor, …)
 openlore mcp              # start MCP server
 ```
+
+`openlore install` auto-detects which agent surfaces are present (Claude Code, Cursor, Cline, Continue, AGENTS.md) and wires each one to call `orient()` automatically — no manual `CLAUDE.md` editing needed. See [docs/install.md](docs/install.md).
 
 Then ask your agent: **`orient("add a new payment method")`**
 
@@ -178,6 +181,14 @@ Sends the analysis to an LLM in 6 structured stages: project survey → entity e
 
 Compares git changes against spec mappings in milliseconds. Detects: Gap (code changed, spec not updated), Uncovered (new file, no spec), Stale (spec references deleted files), ADR gap (code changed in an ADR-referenced domain). Installs as a pre-commit hook.
 
+**Install** (no API key)
+
+`openlore install` auto-wires the popular agent surfaces (Claude Code, Cursor, Cline, Continue, AGENTS.md) so they call `orient()` automatically — no `CLAUDE.md` editing required. Each integration uses a fingerprinted managed block so re-runs are idempotent and hand-edits are detected. `--dry-run` previews diffs; `--uninstall` cleanly removes everything. See [docs/install.md](docs/install.md).
+
+**Preflight** (no API key)
+
+`openlore preflight` is a CI staleness gate: any pull request that edits files in the graph fails the check until the graph is refreshed. Drop-in templates for GitHub Actions, GitLab CI, and generic shell live in [`examples/ci/`](examples/ci/). Weighted scoring surfaces hubs first so a one-line leaf edit doesn't fail the same way a refactor of a top-of-stack module does. See [docs/preflight.md](docs/preflight.md).
+
 **MCP** (no API key)
 
 45 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
@@ -267,6 +278,7 @@ The graph and the OpenSpec spec layer are co-equal: the graph makes orientation 
 |-------|-----|
 | MCP tools reference (45 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
 | Agent setup (Claude Code, Cline, OpenCode, Vibe…) | [docs/agent-setup.md](docs/agent-setup.md) |
+| `openlore install` — auto-configure agent surfaces | [docs/install.md](docs/install.md) |
 | LLM providers + embedding config | [docs/providers.md](docs/providers.md) |
 | Drift detection in depth | [docs/drift-detection.md](docs/drift-detection.md) |
 | Spec-driven tests + spec digest | [docs/spec-tests.md](docs/spec-tests.md) |
