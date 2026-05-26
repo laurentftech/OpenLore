@@ -107,17 +107,33 @@ export function safeJoin(absDir: string, filePath: string): string {
   return resolved;
 }
 
+interface ContextCacheEntry {
+  ctx: CachedContext;
+  mtime: number;
+}
+
+/** One entry per project directory. Invalidated by llm-context.json mtime change. */
+const _contextCache = new Map<string, ContextCacheEntry>();
+
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const filePath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
 
   async function load(): Promise<CachedContext | null> {
     try {
-      const raw = await readFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), 'utf-8');
+      const mtime = (await stat(filePath)).mtimeMs;
+      const cached = _contextCache.get(directory);
+      if (cached && cached.mtime === mtime) {
+        emit(directory, 'cache', { event: 'cache_read', hit: true });
+        return cached.ctx;
+      }
+      // Cache miss — read 3.7MB JSON and open EdgeStore connection
+      const raw = await readFile(filePath, 'utf-8');
       const ctx = JSON.parse(raw) as CachedContext;
-      // Attach EdgeStore when call-graph.db is present (incremental edge updates)
       if (EdgeStore.exists(analysisDir)) {
         ctx.edgeStore = EdgeStore.open(EdgeStore.dbPath(analysisDir));
       }
+      _contextCache.set(directory, { ctx, mtime });
       emit(directory, 'cache', { event: 'cache_read', hit: true });
       return ctx;
     } catch {
