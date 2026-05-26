@@ -1,0 +1,7 @@
+---
+description: OpenLore orient() workflow
+alwaysApply: true
+openlore-fingerprint: {{fingerprint}}
+---
+
+{{instructions}}

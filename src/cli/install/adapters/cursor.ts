@@ -6,6 +6,7 @@
 
 import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { applyMarkdownBlock, uninstallMarkdownBlock } from './markdown-block.js';
 import { fingerprint } from '../block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
@@ -20,16 +21,29 @@ const MCP_ENTRY = {
   args: ['--yes', 'openlore', 'mcp'],
 };
 
-function renderMdc(template: string): string {
-  const fp = fingerprint(template);
-  return `---
-description: OpenLore orient() workflow
-alwaysApply: true
-openlore-fingerprint: ${fp}
----
+async function loadMdcTemplate(): Promise<string> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    // adapters/ → ../templates/cursor-openlore.mdc (dist + tsx run share this layout)
+    join(here, '..', 'templates', 'cursor-openlore.mdc'),
+    // tsx fallback if for any reason we're not co-located with templates
+    join(here, '..', '..', '..', '..', 'src', 'cli', 'install', 'templates', 'cursor-openlore.mdc'),
+  ];
+  for (const p of candidates) {
+    try {
+      return await readFile(p, 'utf8');
+    } catch {
+      /* try next */
+    }
+  }
+  throw new Error('cursor adapter: could not locate cursor-openlore.mdc template');
+}
 
-${template.trimEnd()}
-`;
+async function renderMdc(instructions: string): Promise<string> {
+  const tmpl = await loadMdcTemplate();
+  return tmpl
+    .replace('{{fingerprint}}', fingerprint(instructions.trimEnd()))
+    .replace('{{instructions}}', instructions.trimEnd());
 }
 
 export const cursorAdapter: Adapter = {
@@ -42,7 +56,7 @@ export const cursorAdapter: Adapter = {
     });
 
     const mdcPath = join(ctx.root, MDC_FILE);
-    const desired = renderMdc(ctx.instructionTemplate);
+    const desired = await renderMdc(ctx.instructionTemplate);
     let existing: string | null = null;
     try {
       existing = await readFile(mdcPath, 'utf8');
