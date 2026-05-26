@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { runPreflight } from './index.js';
-import { renderJson, renderHuman } from './report.js';
+import { renderJson, renderHuman, renderGithubAnnotations, buildSummary } from './report.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -206,6 +206,85 @@ describe('openlore preflight', () => {
     res = await runPreflight({ cwd: dir, json: true });
     expect(res.code).toBe(0);
     expect(res.summary?.status).toBe('FRESH');
+  });
+
+  it('--max-staleness raises the threshold and lets a small change through', async () => {
+    const after = (GRAPH_MS + 60_000) / 1000;
+    await writeFile(join(dir, 'src/foo.ts'), 'changed\n');
+    await utimes(join(dir, 'src/foo.ts'), after, after);
+
+    // Default threshold 0 → STALE
+    let res = await runPreflight({ cwd: dir, json: true });
+    expect(res.code).toBe(1);
+    expect(res.summary?.stalenessScore).toBe(1);
+
+    // Threshold 5 → FRESH (score 1 ≤ 5)
+    res = await runPreflight({ cwd: dir, json: true, maxStaleness: 5 });
+    expect(res.code).toBe(0);
+    expect(res.summary?.status).toBe('FRESH');
+    expect(res.summary?.threshold).toBe(5);
+  });
+
+  it('emits GitHub Actions annotations when GITHUB_ACTIONS=true and stale', () => {
+    // Direct unit test on the renderer — avoids env leakage in runPreflight.
+    const summary = buildSummary({
+      diff: {
+        changed: ['src/foo.ts', 'src/new-file.ts'],
+        mechanism: 'git',
+        warnings: [],
+        workingCommit: 'abc1234',
+      },
+      score: {
+        perFile: [
+          { filePath: 'src/foo.ts', inGraph: true, hub: true, maxFanIn: 20, nodeCount: 1, weight: 6 },
+        ],
+        totalScore: 6,
+        hubCount: 1,
+        leafCount: 0,
+        unknownFiles: ['src/new-file.ts'],
+      },
+      graphBuiltAt: GRAPH_TS,
+      graphCommit: null,
+      threshold: 0,
+    });
+
+    const prev = process.env.GITHUB_ACTIONS;
+    process.env.GITHUB_ACTIONS = 'true';
+    try {
+      const out = renderGithubAnnotations(summary);
+      expect(out).toContain('::warning file=src/foo.ts::');
+      // unknown file should NOT get an annotation (weight 0).
+      expect(out).not.toContain('::warning file=src/new-file.ts::');
+      expect(out).toContain('::error::OpenLore preflight: staleness score 6');
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = prev;
+    }
+  });
+
+  it('does NOT emit GHA annotations outside GitHub Actions', () => {
+    const summary = buildSummary({
+      diff: { changed: ['src/foo.ts'], mechanism: 'git', warnings: [], workingCommit: null },
+      score: {
+        perFile: [
+          { filePath: 'src/foo.ts', inGraph: true, hub: false, maxFanIn: 0, nodeCount: 1, weight: 1 },
+        ],
+        totalScore: 1,
+        hubCount: 0,
+        leafCount: 1,
+        unknownFiles: [],
+      },
+      graphBuiltAt: GRAPH_TS,
+      graphCommit: null,
+      threshold: 0,
+    });
+    const prev = process.env.GITHUB_ACTIONS;
+    delete process.env.GITHUB_ACTIONS;
+    try {
+      expect(renderGithubAnnotations(summary)).toBe('');
+    } finally {
+      if (prev !== undefined) process.env.GITHUB_ACTIONS = prev;
+    }
   });
 
   it('hub files contribute more weight than leaf files', async () => {

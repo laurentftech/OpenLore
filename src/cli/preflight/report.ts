@@ -108,6 +108,37 @@ export function renderHuman(s: PreflightSummary): string {
   return lines.join('\n');
 }
 
+/**
+ * Emit GitHub Actions workflow-command annotations so that stale files
+ * appear inline in the PR diff UI when this runs in CI. No-op outside of
+ * GHA. Format docs:
+ *   https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
+ */
+export function renderGithubAnnotations(s: PreflightSummary): string {
+  if (s.status !== 'STALE') return '';
+  if (process.env.GITHUB_ACTIONS !== 'true') return '';
+  const lines: string[] = [];
+  // Per-file warnings — point CI users at the exact files that pushed us
+  // over the threshold. Only annotate files that contributed weight (i.e.
+  // appeared in the graph); new/untracked files have weight 0.
+  for (const f of s.changedFiles) {
+    const inGraphContributor = !s.unknownFiles.includes(f);
+    if (!inGraphContributor) continue;
+    // Escape per GHA workflow-command escape rules.
+    const msg = `OpenLore graph is stale for this file — run \`openlore analyze\` to refresh`;
+    lines.push(`::warning file=${escapeAnnotation(f)}::${escapeAnnotation(msg)}`);
+  }
+  // Top-line error so the PR check fails visibly.
+  lines.push(
+    `::error::OpenLore preflight: staleness score ${s.stalenessScore} > threshold ${s.threshold} (${s.hubCount} hub, ${s.leafCount} leaf changes). Run \`openlore analyze\`.`
+  );
+  return lines.join('\n');
+}
+
+function escapeAnnotation(s: string): string {
+  return s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
 export function renderJson(s: PreflightSummary): string {
   // Exclude transient fields that don't belong in the documented schema.
   const payload = {

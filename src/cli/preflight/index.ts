@@ -20,7 +20,13 @@ import {
 } from '../../constants.js';
 import { computeDiff, readGraphFingerprint } from './diff.js';
 import { scoreChangedFiles } from './score.js';
-import { buildSummary, renderHuman, renderJson, type PreflightSummary } from './report.js';
+import {
+  buildSummary,
+  renderHuman,
+  renderJson,
+  renderGithubAnnotations,
+  type PreflightSummary,
+} from './report.js';
 
 export interface PreflightOptions {
   cwd?: string;
@@ -124,6 +130,10 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
   } else {
     process.stdout.write(renderHuman(summary) + '\n');
   }
+
+  // 8. GitHub Actions inline annotations (no-op outside GHA).
+  const annotations = renderGithubAnnotations(summary);
+  if (annotations) process.stdout.write(annotations + '\n');
 
   return { code: stale ? 1 : 0, summary };
 }

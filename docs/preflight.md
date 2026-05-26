@@ -97,6 +97,8 @@ Drop-in templates live in [`examples/ci/`](../examples/ci/):
 
 All three run `openlore preflight --since <base-ref>` and exit non-zero on stale.
 
+When the process detects `GITHUB_ACTIONS=true`, preflight additionally emits per-file [workflow-command annotations](https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions) — each stale file appears inline in the PR diff UI as a warning, and a top-level error annotation summarises the staleness score. No extra setup required; the GHA template above already runs in that environment.
+
 ## JSON schema (`--json`)
 
 ```json
