@@ -115,6 +115,12 @@ interface ContextCacheEntry {
 /** One entry per project directory. Invalidated by llm-context.json mtime change. */
 const _contextCache = new Map<string, ContextCacheEntry>();
 
+/** Test-only: clear in-memory context cache to force cold path. */
+export function _resetContextCacheForTesting(): void {
+  for (const entry of _contextCache.values()) entry.ctx.edgeStore?.close();
+  _contextCache.clear();
+}
+
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const filePath = join(analysisDir, ARTIFACT_LLM_CONTEXT);

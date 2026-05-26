@@ -149,6 +149,12 @@ const _bm25Cache = new Map<string, { corpus: Bm25Corpus; rowCount: number; rows:
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _tableCache = new Map<string, { table: any }>();
 
+/** Test-only: clear in-memory BM25 + LanceDB caches to force cold path. */
+export function _resetVectorIndexCachesForTesting(): void {
+  _bm25Cache.clear();
+  _tableCache.clear();
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
