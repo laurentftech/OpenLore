@@ -187,6 +187,18 @@ describe('scipLanguageName', () => {
     expect(scipLanguageName('C#')).toBe('CSharp');
   });
 
+  it('maps spec-08 languages with SCIP enum values', () => {
+    expect(scipLanguageName('Kotlin')).toBe('Kotlin');
+    expect(scipLanguageName('PHP')).toBe('PHP');
+    expect(scipLanguageName('C')).toBe('C');
+  });
+
+  it('maps spec-08 languages without SCIP enum values to UnspecifiedLanguage', () => {
+    for (const lang of ['Scala', 'Dart', 'Lua', 'Elixir', 'Bash']) {
+      expect(scipLanguageName(lang)).toBe('');
+    }
+  });
+
   it('returns empty string for languages SCIP has no enum value for', () => {
     expect(scipLanguageName('unknown')).toBe('');
     expect(scipLanguageName('Brainfuck')).toBe('');
