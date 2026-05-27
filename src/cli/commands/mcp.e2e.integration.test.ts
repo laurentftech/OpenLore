@@ -19,6 +19,12 @@
  *   npm run test:integration  # run this file
  *
  * The suite auto-skips when the analysis cache is missing.
+ *
+ * TODO(spec-06-followup): exercise the BM25 search path in CI. These integration
+ * tests are excluded from the CI Unit Tests job, which is how the
+ * "embeddings required" regression originally shipped. A minimal CI step that
+ * builds a BM25-only index for a tiny fixture and asserts orient returns
+ * results would prevent a silent re-regression.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -747,7 +753,7 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       symbol:    'validateDirectory',
       depth:     2,
     });
-    const data = client.parseToolResult(resp) as {
+    type ImpactResult = {
       symbol:      string;
       file:        string;
       language:    string;
@@ -759,6 +765,14 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       downstreamCriticalPath: Array<{ name: string; depth: number }>;
       recommendedStrategy:    { approach: string; rationale: string };
     };
+    // handleAnalyzeImpact resolves the symbol via FTS, which can match more than
+    // one node for a common name. It returns the single result flat, or
+    // `{ matches: [...] }` for several — pick the exact-name match either way.
+    const raw = client.parseToolResult(resp) as ImpactResult | { matches: ImpactResult[] };
+    const data: ImpactResult =
+      'matches' in raw
+        ? (raw.matches.find(m => m.symbol === 'validateDirectory') ?? raw.matches[0])
+        : raw;
 
     expect(data.symbol).toBe('validateDirectory');
     expect(typeof data.file).toBe('string');

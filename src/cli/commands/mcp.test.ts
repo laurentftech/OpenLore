@@ -1250,14 +1250,18 @@ describe('handleSuggestInsertionPoints', () => {
   it('returns error when no vector index exists', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(false);
     const result = await handleSuggestInsertionPoints(testDir, 'add retry') as { error: string };
-    expect(result.error).toMatch(/openlore analyze --embed/);
+    expect(result.error).toMatch(/No search index found/);
   });
 
-  it('returns error when embedding config not found', async () => {
+  it('falls back to BM25 (no error) when embedding config not found', async () => {
     vi.mocked(EmbeddingService.fromEnv).mockImplementation(() => { throw new Error('no env'); });
     vi.mocked(readOpenLoreConfig).mockResolvedValue(null);
-    const result = await handleSuggestInsertionPoints(testDir, 'add retry') as { error: string };
-    expect(result.error).toMatch(/embedding/i);
+    vi.mocked(VectorIndex.search).mockResolvedValue([]);
+    const result = await handleSuggestInsertionPoints(testDir, 'add retry') as { error?: string; candidates: unknown[] };
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.candidates)).toBe(true);
+    // embedSvc resolved to null → search called with a null embedder (BM25 path)
+    expect(VectorIndex.search).toHaveBeenCalledWith(expect.any(String), 'add retry', null, expect.anything());
   });
 
   it('returns empty candidates when search returns no results', async () => {

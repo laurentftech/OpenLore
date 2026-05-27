@@ -232,24 +232,22 @@ export class McpWatcher {
 
       if (!VectorIndex.exists(this.outputPath)) return;
 
-      let embedSvc;
+      let embedSvc: InstanceType<typeof EmbeddingService> | null;
       try {
         embedSvc = EmbeddingService.fromEnv();
       } catch {
         const cfg = await readOpenLoreConfig(this.rootPath);
         embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
       }
-      if (!embedSvc) {
-        process.stderr.write('[mcp-watcher] no embedding service — skipping re-embed\n');
-        return;
-      }
+      // embedSvc may be null: VectorIndex.build then refreshes the BM25-only
+      // corpus rather than re-embedding. Keeps the keyword index live in watch mode.
 
       const cg = context.callGraph!;
       const hubIds    = new Set((cg.hubFunctions ?? []).map(f => f.id));
       const entryIds  = new Set((cg.entryPoints ?? []).map(f => f.id));
       const fileContents = new Map([[rel, content]]);
 
-      const { embedded, reused } = await VectorIndex.build(
+      const { embedded, reused, total, hasEmbeddings } = await VectorIndex.build(
         this.outputPath,
         cg.nodes,
         context.signatures ?? [],
@@ -261,7 +259,9 @@ export class McpWatcher {
       );
 
       process.stderr.write(
-        `[mcp-watcher] re-embedded ${rel}: ${embedded} new, ${reused} reused\n`
+        hasEmbeddings
+          ? `[mcp-watcher] re-embedded ${rel}: ${embedded} new, ${reused} reused\n`
+          : `[mcp-watcher] refreshed BM25 index for ${rel}: ${total} functions\n`
       );
     } catch (err) {
       process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);

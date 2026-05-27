@@ -160,8 +160,8 @@ export async function handleOrient(
 
   if (!hasCodeIndex) {
     return {
-      error: 'No analysis found. Run "openlore analyze --embed" first.',
-      hint: 'With BM25 fallback, "openlore analyze" alone (no --embed) is also sufficient.',
+      error: 'No analysis found. Run "openlore analyze" first.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use; add EMBED_* (or --embed) for semantic search.',
     };
   }
 

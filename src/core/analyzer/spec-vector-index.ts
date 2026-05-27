@@ -16,11 +16,12 @@
  *   const results = await SpecVectorIndex.search(outputDir, "email validation", embedSvc);
  */
 
-import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, basename, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { EmbeddingService } from './embedding-service.js';
+import { tokenize, buildBm25Corpus, bm25Score } from './vector-index.js';
 
 // ============================================================================
 // TYPES
@@ -58,6 +59,40 @@ export interface SpecSearchResult {
 
 const DB_FOLDER = 'vector-index';
 const TABLE_NAME = 'specs';
+
+/**
+ * Spec-index metadata sidecar, sibling to the LanceDB folder. Separate from the
+ * function index's `vector-index-meta.json` so the two tables can have
+ * independent embedding states. Source of truth for whether the spec table
+ * supports ANN search.
+ */
+const META_FILE = 'spec-index-meta.json';
+const META_SCHEMA_VERSION = 1;
+
+interface SpecIndexMeta {
+  hasEmbeddings: boolean;
+  dim: number;
+  model: string | null;
+  builtAt: string;
+  schemaVersion: number;
+}
+
+function specMetaPath(outputDir: string): string {
+  return join(outputDir, META_FILE);
+}
+
+/** Read the spec-index meta sidecar. Missing sidecar ⇒ legacy embedded index. */
+function readSpecMeta(outputDir: string): SpecIndexMeta | null {
+  try {
+    return JSON.parse(readFileSync(specMetaPath(outputDir), 'utf-8')) as SpecIndexMeta;
+  } catch {
+    return null;
+  }
+}
+
+async function writeSpecMeta(outputDir: string, meta: SpecIndexMeta): Promise<void> {
+  await writeFile(specMetaPath(outputDir), JSON.stringify(meta, null, 2) + '\n', 'utf-8');
+}
 
 // Mapping entry shape from .openlore/analysis/mapping.json
 interface MappingEntry {
@@ -263,10 +298,10 @@ export class SpecVectorIndex {
   static async build(
     outputDir: string,
     specsDir: string,
-    embedSvc: EmbeddingService,
+    embedSvc: EmbeddingService | null,
     mappingJsonPath?: string,
     decisionsDir?: string
-  ): Promise<{ recordCount: number }> {
+  ): Promise<{ recordCount: number; hasEmbeddings: boolean }> {
     const { connect } = await import('@lancedb/lancedb');
 
     // Load mapping index (optional)
@@ -332,6 +367,27 @@ export class SpecVectorIndex {
       throw new Error('No spec sections could be parsed');
     }
 
+    const dbPath = join(outputDir, DB_FOLDER);
+
+    // ── BM25-only build (no embedding service) ───────────────────────────────
+    // Write records without a `vector` column and record hasEmbeddings:false.
+    if (!embedSvc) {
+      const db = await connect(dbPath);
+      await db.createTable(
+        TABLE_NAME,
+        records as unknown as Record<string, unknown>[],
+        { mode: 'overwrite' }
+      );
+      await writeSpecMeta(outputDir, {
+        hasEmbeddings: false,
+        dim: 0,
+        model: null,
+        builtAt: new Date().toISOString(),
+        schemaVersion: META_SCHEMA_VERSION,
+      });
+      return { recordCount: records.length, hasEmbeddings: false };
+    }
+
     // Batch-embed
     const texts = records.map(r => r.text);
     const vectors = await embedSvc.embed(texts);
@@ -346,11 +402,18 @@ export class SpecVectorIndex {
     }));
 
     // Write to LanceDB (same DB folder, table "specs")
-    const dbPath = join(outputDir, DB_FOLDER);
     const db = await connect(dbPath);
     await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
 
-    return { recordCount: fullRecords.length };
+    await writeSpecMeta(outputDir, {
+      hasEmbeddings: true,
+      dim: fullRecords[0]?.vector.length ?? 0,
+      model: embedSvc.modelName,
+      builtAt: new Date().toISOString(),
+      schemaVersion: META_SCHEMA_VERSION,
+    });
+
+    return { recordCount: fullRecords.length, hasEmbeddings: true };
   }
 
   /**
@@ -359,7 +422,7 @@ export class SpecVectorIndex {
   static async search(
     outputDir: string,
     query: string,
-    embedSvc: EmbeddingService,
+    embedSvc: EmbeddingService | null | undefined,
     opts: {
       limit?: number;
       domain?: string;
@@ -371,28 +434,38 @@ export class SpecVectorIndex {
     const { limit = 10, domain, section } = opts;
 
     if (!SpecVectorIndex.exists(outputDir)) {
-      throw new Error('No spec index found. Run "openlore analyze --embed" or "openlore analyze --reindex-specs" first.');
+      throw new Error('No spec index found. Run "openlore analyze" first.');
+    }
+
+    const dbPath = join(outputDir, DB_FOLDER);
+    const db = await connect(dbPath);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const table: any = await db.openTable(TABLE_NAME);
+
+    // ── BM25-only path ─────────────────────────────────────────────────────────
+    // Force BM25 when no embedder is available OR the spec index was built
+    // without embeddings (no `vector` column). Missing sidecar ⇒ legacy embedded.
+    const meta = readSpecMeta(outputDir);
+    const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
+    if (!embedSvc || !indexHasEmbeddings) {
+      return SpecVectorIndex._bm25Only(table, query, limit, domain, section);
     }
 
     const [queryVector] = await embedSvc.embed([query]);
     if (!queryVector) throw new Error('Failed to embed query');
 
-    const dbPath = join(outputDir, DB_FOLDER);
-    const db = await connect(dbPath);
-    const table = await db.openTable(TABLE_NAME);
-
     const fetchLimit = Math.min(limit * 10, 500);
     const rows = await table.query().nearestTo(queryVector).limit(fetchLimit).toArray();
 
     const filtered = rows
-      .filter(row => {
+      .filter((row: Record<string, unknown>) => {
         if (domain && (row.domain as string) !== domain) return false;
         if (section && (row.section as string) !== section) return false;
         return true;
       })
       .slice(0, limit);
 
-    return filtered.map(row => {
+    return filtered.map((row: Record<string, unknown>) => {
       let linkedFiles: string[] = [];
       try {
         linkedFiles = JSON.parse(row.linkedFiles as string) as string[];
@@ -410,6 +483,60 @@ export class SpecVectorIndex {
         score: row._distance as number,
       };
     });
+  }
+
+  /**
+   * BM25-only search over the spec corpus: used when no embedding service is
+   * available or the index was built without embeddings. Scores the full
+   * corpus with BM25 and returns the top `limit` matching sections.
+   */
+  private static async _bm25Only(
+    table: { query(): { toArray(): Promise<Record<string, unknown>[]> } },
+    query: string,
+    limit: number,
+    domain?: string,
+    section?: string,
+  ): Promise<SpecSearchResult[]> {
+    const allRows = await table.query().toArray() as Record<string, unknown>[];
+    const corpus = buildBm25Corpus(
+      allRows.map(r => ({ id: r.id as string, text: r.text as string }))
+    );
+    const queryTokens = tokenize(query);
+    const rowById = new Map(allRows.map(r => [r.id as string, r]));
+
+    return corpus.docs
+      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
+      .filter(({ score }) => score > 0)
+      // Deterministic ordering: score desc, ties broken by id asc.
+      .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
+      .map(({ idx, score }) => {
+        const row = rowById.get(corpus.docs[idx].id);
+        return row ? { row, score } : null;
+      })
+      .filter((x): x is { row: Record<string, unknown>; score: number } => x !== null)
+      .filter(({ row }) => {
+        if (domain && (row.domain as string) !== domain) return false;
+        if (section && (row.section as string) !== section) return false;
+        return true;
+      })
+      .slice(0, limit)
+      .map(({ row, score }) => {
+        let linkedFiles: string[] = [];
+        try {
+          linkedFiles = JSON.parse(row.linkedFiles as string) as string[];
+        } catch { /* ignore */ }
+        return {
+          record: {
+            id: row.id as string,
+            domain: row.domain as string,
+            section: row.section as string,
+            title: row.title as string,
+            text: row.text as string,
+            linkedFiles,
+          },
+          score,
+        };
+      });
   }
 
   /**

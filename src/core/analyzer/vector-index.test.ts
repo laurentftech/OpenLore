@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { VectorIndex } from './vector-index.js';
+import { VectorIndex, _resetVectorIndexCachesForTesting } from './vector-index.js';
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { EmbeddingService } from './embedding-service.js';
@@ -273,6 +274,119 @@ describe('VectorIndex', () => {
         minFanIn: 9999,
       });
       expect(results).toHaveLength(0);
+    });
+  });
+
+  // ==========================================================================
+  // BM25-only build + search (no embedding service) — spec-06
+  // ==========================================================================
+
+  describe('BM25-only (no embeddings)', () => {
+    const META = 'vector-index-meta.json';
+
+    async function readMeta(dir: string) {
+      return JSON.parse(await readFile(join(dir, META), 'utf-8'));
+    }
+
+    it('build(embedSvc=null) creates the index and a hasEmbeddings:false sidecar', async () => {
+      const res = await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+      expect(VectorIndex.exists(tmpDir)).toBe(true);
+      expect(res.hasEmbeddings).toBe(false);
+      expect(res.total).toBe(SAMPLE_NODES.length);
+
+      expect(existsSync(join(tmpDir, META))).toBe(true);
+      const meta = await readMeta(tmpDir);
+      expect(meta.hasEmbeddings).toBe(false);
+      expect(meta.dim).toBe(0);
+      expect(meta.model).toBeNull();
+    });
+
+    it('search(embedSvc=null) returns ranked BM25 results with correct fields', async () => {
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(['src/auth.ts::authenticate']), new Set(), null);
+      _resetVectorIndexCachesForTesting();
+
+      const results = await VectorIndex.search(tmpDir, 'authenticate', null, { limit: 10 });
+      expect(results.length).toBeGreaterThan(0);
+      const auth = results.find(r => r.record.name === 'authenticate');
+      expect(auth).toBeDefined();
+      expect(auth!.record.isHub).toBe(true);
+      expect((auth!.record as Record<string, unknown>)['vector']).toBeUndefined();
+      for (const r of results) expect(typeof r.score).toBe('number');
+    });
+
+    it('does NOT embed the query against a hasEmbeddings:false index, even when an embedder is supplied', async () => {
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+      _resetVectorIndexCachesForTesting();
+
+      const spy = makeMockEmbedSvc();
+      const results = await VectorIndex.search(tmpDir, 'authenticate', spy, { limit: 10 });
+      expect(spy.embed).not.toHaveBeenCalled();
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    it('BM25 ranking is deterministic across runs for a fixed query + corpus', async () => {
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+
+      _resetVectorIndexCachesForTesting();
+      const a = await VectorIndex.search(tmpDir, 'user', null, { limit: 10 });
+      _resetVectorIndexCachesForTesting();
+      const b = await VectorIndex.search(tmpDir, 'user', null, { limit: 10 });
+      expect(a.map(r => r.record.id)).toEqual(b.map(r => r.record.id));
+    });
+
+    it('build with a mock embedder records hasEmbeddings:true with the correct dim', async () => {
+      const embedSvc = makeMockEmbedSvc();
+      const res = await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
+      expect(res.hasEmbeddings).toBe(true);
+      const meta = await readMeta(tmpDir);
+      expect(meta.hasEmbeddings).toBe(true);
+      expect(meta.dim).toBe(8); // DIM from the mock
+    });
+
+    it('incremental rebuild on a no-embedding index does not crash and refreshes the corpus', async () => {
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+      const res = await VectorIndex.build(
+        tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null,
+        undefined, /* incremental */ true
+      );
+      expect(res.hasEmbeddings).toBe(false);
+      _resetVectorIndexCachesForTesting();
+      const results = await VectorIndex.search(tmpDir, 'authenticate', null, { limit: 10 });
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    it('downgrade: embedded → null rebuild converts to BM25-only', async () => {
+      const embedSvc = makeMockEmbedSvc();
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
+      expect((await readMeta(tmpDir)).hasEmbeddings).toBe(true);
+
+      const res = await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+      expect(res.hasEmbeddings).toBe(false);
+      expect((await readMeta(tmpDir)).hasEmbeddings).toBe(false);
+
+      // A supplied embedder must now be ignored (BM25 forced by the sidecar).
+      _resetVectorIndexCachesForTesting();
+      const spy = makeMockEmbedSvc();
+      await VectorIndex.search(tmpDir, 'authenticate', spy, { limit: 10 });
+      expect(spy.embed).not.toHaveBeenCalled();
+    });
+
+    it('upgrade: BM25-only → embedded rebuild restores hybrid search', async () => {
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), null);
+      expect((await readMeta(tmpDir)).hasEmbeddings).toBe(false);
+
+      const embedSvc = makeMockEmbedSvc();
+      const res = await VectorIndex.build(
+        tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc,
+        undefined, /* incremental */ true
+      );
+      expect(res.hasEmbeddings).toBe(true);
+      expect((await readMeta(tmpDir)).hasEmbeddings).toBe(true);
+
+      _resetVectorIndexCachesForTesting();
+      const spy = makeMockEmbedSvc();
+      await VectorIndex.search(tmpDir, 'authenticate', spy, { limit: 10 });
+      expect(spy.embed).toHaveBeenCalled(); // ANN path active again
     });
   });
 });

@@ -16,7 +16,8 @@
  *   const results = await VectorIndex.search(outputDir, "authenticate user with JWT", embedSvc);
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
@@ -61,6 +62,53 @@ export interface SearchResult {
 const DB_FOLDER = 'vector-index';
 const TABLE_NAME = 'functions';
 
+/**
+ * Sidecar metadata file, sibling to the LanceDB `vector-index/` folder.
+ * Single source of truth for whether ANN (dense) search is available: a
+ * BM25-only index has `hasEmbeddings: false` and no `vector` column, so search
+ * must never attempt to embed a query or run ANN against it.
+ */
+const META_FILE = 'vector-index-meta.json';
+const META_SCHEMA_VERSION = 1;
+
+export interface VectorIndexMeta {
+  hasEmbeddings: boolean;
+  dim: number;
+  model: string | null;
+  builtAt: string;
+  schemaVersion: number;
+}
+
+// Module-level meta cache, keyed by dbPath. Invalidated by build().
+const _metaCache = new Map<string, VectorIndexMeta | null>();
+
+function metaFilePath(outputDir: string): string {
+  return join(outputDir, META_FILE);
+}
+
+/**
+ * Read the index metadata sidecar (cached per dbPath).
+ * Returns null when no sidecar exists — e.g. a legacy index built before the
+ * sidecar was introduced. Callers treat a missing sidecar as "embeddings
+ * present" to preserve pre-change behaviour for those indexes.
+ */
+function readMeta(outputDir: string): VectorIndexMeta | null {
+  const dbPath = join(outputDir, DB_FOLDER);
+  if (_metaCache.has(dbPath)) return _metaCache.get(dbPath) ?? null;
+  let meta: VectorIndexMeta | null = null;
+  try {
+    meta = JSON.parse(readFileSync(metaFilePath(outputDir), 'utf-8')) as VectorIndexMeta;
+  } catch {
+    meta = null;
+  }
+  _metaCache.set(dbPath, meta);
+  return meta;
+}
+
+async function writeMeta(outputDir: string, meta: VectorIndexMeta): Promise<void> {
+  await writeFile(metaFilePath(outputDir), JSON.stringify(meta, null, 2) + '\n', 'utf-8');
+}
+
 /** Convert a raw LanceDB row to a FunctionRecord (without the vector field). */
 function rowToRecord(row: Record<string, unknown>): Omit<FunctionRecord, 'vector'> {
   return {
@@ -83,7 +131,7 @@ function rowToRecord(row: Record<string, unknown>): Omit<FunctionRecord, 'vector
 // BM25 SPARSE RETRIEVAL (#7)
 // ============================================================================
 
-interface Bm25Corpus {
+export interface Bm25Corpus {
   docs: Array<{ id: string; tfMap: Map<string, number>; length: number }>;
   /** term → number of documents containing it */
   df: Map<string, number>;
@@ -91,12 +139,12 @@ interface Bm25Corpus {
   N: number;
 }
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   // Split on non-alphanumeric, keep tokens longer than 1 char
   return text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1);
 }
 
-function buildBm25Corpus(records: Array<{ id: string; text: string }>): Bm25Corpus {
+export function buildBm25Corpus(records: Array<{ id: string; text: string }>): Bm25Corpus {
   const docs: Bm25Corpus['docs'] = [];
   const df = new Map<string, number>();
   let totalLen = 0;
@@ -116,7 +164,7 @@ function buildBm25Corpus(records: Array<{ id: string; text: string }>): Bm25Corp
 const BM25_K1 = 1.2;
 const BM25_B  = 0.75;
 
-function bm25Score(corpus: Bm25Corpus, queryTokens: string[], docIdx: number): number {
+export function bm25Score(corpus: Bm25Corpus, queryTokens: string[], docIdx: number): number {
   const doc = corpus.docs[docIdx];
   let score = 0;
   for (const q of queryTokens) {
@@ -153,6 +201,7 @@ const _tableCache = new Map<string, { table: any }>();
 export function _resetVectorIndexCachesForTesting(): void {
   _bm25Cache.clear();
   _tableCache.clear();
+  _metaCache.clear();
 }
 
 // ============================================================================
@@ -240,6 +289,12 @@ export class VectorIndex {
    * when no index exists) to do a full rebuild.
    *
    * Returns a summary of how many functions were embedded vs reused.
+   *
+   * When `embedSvc` is null, builds a **keyword-only (BM25)** index: the corpus
+   * rows are written without a `vector` column and the meta sidecar records
+   * `hasEmbeddings: false`. Search then serves BM25 results and never attempts
+   * ANN. Re-building a previously-embedded index with `embedSvc=null` downgrades
+   * it to BM25-only (overwrite + meta update), and vice-versa upgrades it.
    */
   static async build(
     outputDir: string,
@@ -247,12 +302,12 @@ export class VectorIndex {
     signatures: FileSignatureMap[],
     hubIds: Set<string>,
     entryPointIds: Set<string>,
-    embedSvc: EmbeddingService,
+    embedSvc: EmbeddingService | null,
     /** Optional map of filePath → source content for skeleton-based body indexing */
     fileContents?: Map<string, string>,
     /** When true, reuse cached vectors for unchanged functions */
     incremental = false
-  ): Promise<{ embedded: number; reused: number }> {
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean }> {
     const { connect } = await import('@lancedb/lancedb');
 
     if (nodes.length === 0) {
@@ -315,11 +370,44 @@ export class VectorIndex {
       }
     }
 
-    // ── Incremental cache lookup ─────────────────────────────────────────────
     const dbPath = join(outputDir, DB_FOLDER);
+
+    // ── BM25-only build (no embedding service) ───────────────────────────────
+    // Write the corpus without a `vector` column so the table can never be
+    // searched with ANN, and record `hasEmbeddings: false` in the sidecar.
+    if (!embedSvc) {
+      const db = await connect(dbPath);
+      await db.createTable(
+        TABLE_NAME,
+        candidates as unknown as Record<string, unknown>[],
+        { mode: 'overwrite' }
+      );
+      await writeMeta(outputDir, {
+        hasEmbeddings: false,
+        dim: 0,
+        model: null,
+        builtAt: new Date().toISOString(),
+        schemaVersion: META_SCHEMA_VERSION,
+      });
+      _tableCache.delete(dbPath);
+      _bm25Cache.delete(dbPath);
+      _metaCache.delete(dbPath);
+      return { embedded: 0, reused: 0, total: candidates.length, hasEmbeddings: false };
+    }
+
+    // ── Incremental cache lookup ─────────────────────────────────────────────
     let cachedVectors = new Map<string, number[]>(); // id → vector
 
-    if (incremental && VectorIndex.exists(outputDir)) {
+    // Only reuse vectors from an existing index that actually has them. A
+    // previously BM25-only index (hasEmbeddings:false) has no `vector` column,
+    // so rebuild it fully as a hybrid index (upgrade path).
+    const existingMeta = incremental ? readMeta(outputDir) : null;
+    const canReuseVectors =
+      incremental &&
+      VectorIndex.exists(outputDir) &&
+      (existingMeta === null || existingMeta.hasEmbeddings);
+
+    if (canReuseVectors) {
       try {
         const db = await connect(dbPath);
         const table = await db.openTable(TABLE_NAME);
@@ -383,11 +471,25 @@ export class VectorIndex {
     const db = await connect(dbPath);
     await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
 
+    await writeMeta(outputDir, {
+      hasEmbeddings: true,
+      dim: fullRecords[0]?.vector.length ?? 0,
+      model: embedSvc.modelName,
+      builtAt: new Date().toISOString(),
+      schemaVersion: META_SCHEMA_VERSION,
+    });
+
     // Invalidate search caches — index was just rebuilt
     _tableCache.delete(dbPath);
     _bm25Cache.delete(dbPath);
+    _metaCache.delete(dbPath);
 
-    return { embedded: toEmbed.length, reused: cachedIdx.length };
+    return {
+      embedded: toEmbed.length,
+      reused: cachedIdx.length,
+      total: fullRecords.length,
+      hasEmbeddings: true,
+    };
   }
 
   /**
@@ -430,8 +532,13 @@ export class VectorIndex {
     }
     const table = tableEntry.table;
 
-    // ── BM25-only path (no embedding service available) ───────────────────────
-    if (!embedSvc) {
+    // ── BM25-only path ─────────────────────────────────────────────────────────
+    // Force BM25 when no embedder is available OR when the index was built
+    // without embeddings (no `vector` column). The sidecar is the source of
+    // truth: a missing sidecar (legacy index) is treated as embeddings-present.
+    const meta = readMeta(outputDir);
+    const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
+    if (!embedSvc || !indexHasEmbeddings) {
       return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn);
     }
 
@@ -563,7 +670,9 @@ export class VectorIndex {
     return corpus.docs
       .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
       .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score)
+      // Sort by score desc; break ties by id asc so ranking is deterministic
+      // across runs for a fixed query + corpus.
+      .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
       .slice(0, limit * 3) // oversample before filtering
       .map(({ idx, score }) => {
         const row = rowById.get(corpus.docs[idx].id);

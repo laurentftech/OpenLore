@@ -324,7 +324,7 @@ describe('McpWatcher.reEmbed', () => {
     vi.restoreAllMocks();
   });
 
-  it('skips re-embed and logs when no embedding service is available', async () => {
+  it('refreshes the BM25 index (embedSvc=null) when no embedding service is available', async () => {
     const cg = makeCallGraph();
     const ctx = makeContext({ callGraph: cg });
     const { rootPath, outputPath } = await setupProject(ctx);
@@ -333,8 +333,9 @@ describe('McpWatcher.reEmbed', () => {
     await mkdir(join(outputPath, 'vector-index'), { recursive: true });
     await writeFile(join(outputPath, 'vector-index', '.keep'), '', 'utf-8');
 
+    const mockBuild = vi.fn().mockResolvedValue({ embedded: 0, reused: 0, total: 1, hasEmbeddings: false });
     vi.doMock('../analyzer/vector-index.js', () => ({
-      VectorIndex: { exists: vi.fn().mockReturnValue(true), build: vi.fn() },
+      VectorIndex: { exists: vi.fn().mockReturnValue(true), build: mockBuild },
     }));
     vi.doMock('../analyzer/embedding-service.js', () => ({
       EmbeddingService: {
@@ -353,8 +354,19 @@ describe('McpWatcher.reEmbed', () => {
     const watcher = new McpWatcher({ rootPath, outputPath });
     await watcher.handleChange(srcFile);
 
+    // build is invoked with a null embedder (BM25 refresh), not skipped
+    expect(mockBuild).toHaveBeenCalledWith(
+      outputPath,
+      cg.nodes,
+      expect.any(Array),
+      expect.any(Set),
+      expect.any(Set),
+      null,
+      expect.any(Map),
+      true,
+    );
     expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('no embedding service'),
+      expect.stringContaining('refreshed BM25 index'),
     );
   });
 
@@ -363,7 +375,7 @@ describe('McpWatcher.reEmbed', () => {
     const ctx = makeContext({ callGraph: cg });
     const { rootPath, outputPath } = await setupProject(ctx);
 
-    const mockBuild = vi.fn().mockResolvedValue({ embedded: 3, reused: 1 });
+    const mockBuild = vi.fn().mockResolvedValue({ embedded: 3, reused: 1, total: 4, hasEmbeddings: true });
     const mockEmbedSvc = {};
 
     vi.doMock('../analyzer/vector-index.js', () => ({

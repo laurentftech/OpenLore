@@ -58,6 +58,11 @@ export class EmbeddingService {
     }
   }
 
+  /** The configured embedding model name (recorded in the index metadata sidecar). */
+  get modelName(): string {
+    return this.model;
+  }
+
   /**
    * Build an EmbeddingService from environment variables.
    * Throws if EMBED_BASE_URL or EMBED_MODEL are not set.

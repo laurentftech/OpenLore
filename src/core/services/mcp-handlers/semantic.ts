@@ -147,9 +147,8 @@ export async function handleSearchCode(
 
   if (!VectorIndex.exists(outputDir)) {
     return {
-      error:
-        'No vector index found. Run "openlore analyze --embed" first, ' +
-        'then configure EMBED_BASE_URL and EMBED_MODEL.',
+      error: 'No search index found. Run "openlore analyze" first.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index; add EMBED_BASE_URL/EMBED_MODEL for semantic search.',
     };
   }
 
@@ -254,31 +253,18 @@ export async function handleSuggestInsertionPoints(
 
   if (!VectorIndex.exists(outputDir)) {
     return {
-      error:
-        'No vector index found. Run "openlore analyze --embed" first, ' +
-        'then configure EMBED_BASE_URL and EMBED_MODEL.',
+      error: 'No search index found. Run "openlore analyze" first.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index; add EMBED_BASE_URL/EMBED_MODEL for semantic search.',
     };
   }
 
-  let embedSvc: InstanceType<typeof EmbeddingService>;
+  // Resolve embedding service — null triggers BM25 fallback in VectorIndex.search().
+  let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
   try {
     embedSvc = EmbeddingService.fromEnv();
   } catch {
     const cfg = await readOpenLoreConfig(absDir);
-    if (!cfg) {
-      return {
-        error:
-          'No embedding configuration found. Set EMBED_BASE_URL and EMBED_MODEL env vars, or add an "embedding" section to .openlore/config.json.',
-      };
-    }
-    const svcFromConfig = EmbeddingService.fromConfig(cfg);
-    if (!svcFromConfig) {
-      return {
-        error:
-          'No embedding configuration found. Set EMBED_BASE_URL and EMBED_MODEL env vars, or add an "embedding" section to .openlore/config.json.',
-      };
-    }
-    embedSvc = svcFromConfig;
+    embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
   }
 
   limit = Math.max(1, Math.min(limit, 20));
@@ -461,31 +447,24 @@ export async function handleSearchSpecs(
 
   if (!SpecVectorIndex.exists(outputDir)) {
     return {
-      error:
-        'No spec index found. Run "openlore analyze --embed" or "openlore analyze --reindex-specs" first, ' +
-        'then configure EMBED_BASE_URL and EMBED_MODEL.',
+      error: 'No spec index found. Run "openlore analyze" first.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) spec index; configure EMBED_* for semantic spec search.',
     };
   }
 
-  let embedSvc: InstanceType<typeof EmbeddingService>;
+  // Resolve embedding service — null triggers BM25 fallback in SpecVectorIndex.search().
+  let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
+  let searchMode = 'hybrid';
   try {
     embedSvc = EmbeddingService.fromEnv();
   } catch {
     const cfg = await readOpenLoreConfig(absDir);
-    if (!cfg) {
-      return {
-        error:
-          'No embedding configuration found. Set EMBED_BASE_URL and EMBED_MODEL env vars, or add an "embedding" section to .openlore/config.json.',
-      };
+    const svcFromConfig = cfg ? EmbeddingService.fromConfig(cfg) : null;
+    if (svcFromConfig) {
+      embedSvc = svcFromConfig;
+    } else {
+      searchMode = 'bm25_fallback';
     }
-    const svcFromConfig = EmbeddingService.fromConfig(cfg);
-    if (!svcFromConfig) {
-      return {
-        error:
-          'No embedding configuration found. Set EMBED_BASE_URL and EMBED_MODEL env vars, or add an "embedding" section to .openlore/config.json.',
-      };
-    }
-    embedSvc = svcFromConfig;
   }
 
   limit = Math.max(1, Math.min(limit, 50));
@@ -496,6 +475,12 @@ export async function handleSearchSpecs(
 
   return {
     query,
+    searchMode,
+    ...(searchMode === 'bm25_fallback'
+      ? {
+          note: 'No embedding endpoint — spec results based on keyword matching only. Configure EMBED_BASE_URL + EMBED_MODEL for semantic spec search.',
+        }
+      : {}),
     count: results.length,
     results: results.map((r) => ({
       score: r.score,

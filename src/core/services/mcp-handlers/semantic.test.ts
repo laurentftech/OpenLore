@@ -201,9 +201,9 @@ describe('handleSearchSpecs', () => {
     }));
 
     const { handleSearchSpecs } = await import('./semantic.js');
-    const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string };
+    const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
     expect(result.error).toContain('No spec index found');
-    expect(result.error).toContain('--reindex-specs');
+    expect(result.hint).toContain('keyword');
   });
 });
 
@@ -259,7 +259,7 @@ describe('handleSearchCode', () => {
 
     const { handleSearchCode } = await import('./semantic.js');
     const result = await handleSearchCode(tmpDir, 'auth handler') as { error: string };
-    expect(result.error).toContain('No vector index found');
+    expect(result.error).toContain('No search index found');
   });
 
   it('returns results with bm25_fallback when embedding service unavailable', async () => {
@@ -308,12 +308,15 @@ describe('handleSuggestInsertionPoints', () => {
 
     const { handleSuggestInsertionPoints } = await import('./semantic.js');
     const result = await handleSuggestInsertionPoints(tmpDir, 'add logging') as { error: string };
-    expect(result.error).toContain('No vector index found');
+    expect(result.error).toContain('No search index found');
   });
 
-  it('returns error when embedding service is unavailable and no config', async () => {
+  it('falls back to BM25 (no error) when no embedding service is available', async () => {
+    // With spec-06 the handler passes embedSvc=null to VectorIndex.search,
+    // which serves BM25 results from a no-embedding index instead of erroring.
+    const search = vi.fn().mockResolvedValue([]);
     vi.doMock('../../analyzer/vector-index.js', () => ({
-      VectorIndex: { exists: vi.fn().mockReturnValue(true), search: vi.fn() },
+      VectorIndex: { exists: vi.fn().mockReturnValue(true), search },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
       EmbeddingService: {
@@ -323,8 +326,12 @@ describe('handleSuggestInsertionPoints', () => {
     }));
 
     const { handleSuggestInsertionPoints } = await import('./semantic.js');
-    const result = await handleSuggestInsertionPoints(tmpDir, 'add feature') as { error: string };
-    expect(result.error).toContain('No embedding configuration');
+    const result = await handleSuggestInsertionPoints(tmpDir, 'add feature') as { error?: string; description: string; candidates: unknown[] };
+    expect(result.error).toBeUndefined();
+    expect(result.description).toBe('add feature');
+    expect(Array.isArray(result.candidates)).toBe(true);
+    // embedSvc resolved to null → search invoked with a null embedder (BM25 path)
+    expect(search).toHaveBeenCalledWith(expect.any(String), 'add feature', null, expect.anything());
   });
 });
 
@@ -339,12 +346,10 @@ describe('handleSearchSpecs — success path', () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'openlore-search-specs-success-'));
   });
 
-  it('returns error when no embedding config exists (spec index found but no embedSvc)', async () => {
+  it('falls back to BM25 (no error) when no embedding config exists but the spec index is present', async () => {
+    const search = vi.fn().mockResolvedValue([]);
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({
-      SpecVectorIndex: {
-        exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([]),
-      },
+      SpecVectorIndex: { exists: vi.fn().mockReturnValue(true), search },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
       EmbeddingService: {
@@ -354,20 +359,21 @@ describe('handleSearchSpecs — success path', () => {
     }));
 
     const { handleSearchSpecs } = await import('./semantic.js');
-    const result = await handleSearchSpecs(tmpDir, 'auth') as { error: string };
-    expect(result.error).toContain('No embedding configuration');
+    const result = await handleSearchSpecs(tmpDir, 'auth') as { error?: string; searchMode: string; note?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.searchMode).toBe('bm25_fallback');
+    expect(result.note).toContain('keyword');
+    expect(search).toHaveBeenCalledWith(expect.any(String), 'auth', null, expect.anything());
   });
 
-  it('returns error when cfg exists but fromConfig returns null', async () => {
+  it('uses BM25 fallback when cfg exists but fromConfig returns null', async () => {
     // Create minimal .openlore/config.json so readOpenLoreConfig returns a config
     await mkdir(join(tmpDir, '.openlore'), { recursive: true });
     await writeFile(join(tmpDir, '.openlore', 'config.json'), JSON.stringify({ version: '1' }), 'utf-8');
 
+    const search = vi.fn().mockResolvedValue([]);
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({
-      SpecVectorIndex: {
-        exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([]),
-      },
+      SpecVectorIndex: { exists: vi.fn().mockReturnValue(true), search },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
       EmbeddingService: {
@@ -377,8 +383,9 @@ describe('handleSearchSpecs — success path', () => {
     }));
 
     const { handleSearchSpecs } = await import('./semantic.js');
-    const result = await handleSearchSpecs(tmpDir, 'auth') as { error: string };
-    expect(result.error).toContain('No embedding configuration');
+    const result = await handleSearchSpecs(tmpDir, 'auth') as { error?: string; searchMode: string };
+    expect(result.error).toBeUndefined();
+    expect(result.searchMode).toBe('bm25_fallback');
   });
 });
 

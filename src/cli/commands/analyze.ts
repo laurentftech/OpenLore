@@ -758,16 +758,14 @@ async function runEmbedStep(
     const { EmbeddingService } = await import('../../core/analyzer/embedding-service.js');
     const { VectorIndex } = await import('../../core/analyzer/vector-index.js');
 
-    // Resolve embedding service
-    let embedSvc: InstanceType<typeof EmbeddingService>;
+    // Resolve embedding service — best-effort. When none is configured we build
+    // a keyword-only (BM25) index rather than aborting the whole index build.
+    let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
     try {
       embedSvc = EmbeddingService.fromEnv();
     } catch {
       const cfg = openloreConfig ?? await readOpenLoreConfig(rootPath);
-      if (!cfg) throw new Error('No embedding config found. Set EMBED_BASE_URL and EMBED_MODEL, or add "embedding" to .openlore/config.json');
-      const svcFromConfig = EmbeddingService.fromConfig(cfg);
-      if (!svcFromConfig) throw new Error('No embedding config found. Set EMBED_BASE_URL and EMBED_MODEL, or add "embedding" to .openlore/config.json');
-      embedSvc = svcFromConfig;
+      embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
     }
 
     // Load context from disk if not provided (cache hit path)
@@ -798,13 +796,33 @@ async function runEmbedStep(
         } catch { /* skip unreadable files */ }
       }));
 
-      const { embedded, reused } = await VectorIndex.build(
-        outputPath, cg.nodes, sigs, hubIds, entryIds, embedSvc, fileContents,
-        /* incremental */ !force
-      );
-      const total = embedded + reused;
-      const cacheNote = reused > 0 ? ` (${embedded} embedded, ${reused} cached)` : '';
-      console.log(`    ✓ Function index built (${total} functions${cacheNote}, ${fileContents.size} files with skeleton bodies)`);
+      // Build with the embedder when available; if a configured embedder fails
+      // at runtime (endpoint unreachable), warn and fall back to a BM25 index
+      // rather than producing nothing.
+      let result;
+      try {
+        result = await VectorIndex.build(
+          outputPath, cg.nodes, sigs, hubIds, entryIds, embedSvc, fileContents,
+          /* incremental */ !force
+        );
+      } catch (buildErr) {
+        if (embedSvc) {
+          console.log(`    ⚠ Embedding failed (${(buildErr as Error).message}) — building keyword (BM25) index instead.`);
+          result = await VectorIndex.build(
+            outputPath, cg.nodes, sigs, hubIds, entryIds, null, fileContents,
+            /* incremental */ false
+          );
+        } else {
+          throw buildErr;
+        }
+      }
+
+      if (result.hasEmbeddings) {
+        const cacheNote = result.reused > 0 ? ` (${result.embedded} embedded, ${result.reused} cached)` : '';
+        console.log(`    ✓ Function index built (${result.total} functions${cacheNote}, ${fileContents.size} files with skeleton bodies)`);
+      } else {
+        console.log(`    ✓ Built keyword (BM25) search index (${result.total} functions) — set EMBED_BASE_URL/EMBED_MODEL or add "embedding" to .openlore/config.json for semantic search.`);
+      }
       console.log(`    → ${outputPath.replace(rootPath + '/', '')}vector-index/`);
     }
 
@@ -834,16 +852,14 @@ async function runSpecIndexing(
   const { SpecVectorIndex } = await import('../../core/analyzer/spec-vector-index.js');
   const { readOpenLoreConfig } = await import('../../core/services/config-manager.js');
 
-  // Resolve embedding service
-  let embedSvc: InstanceType<typeof EmbeddingService>;
+  // Resolve embedding service — best-effort. When none is configured we build
+  // a keyword-only (BM25) spec index rather than skipping spec search entirely.
+  let embedSvc: InstanceType<typeof EmbeddingService> | null = null;
   try {
     embedSvc = EmbeddingService.fromEnv();
   } catch {
     const cfg = openloreConfig ?? await readOpenLoreConfig(rootPath);
-    if (!cfg) return; // no embedding config — silently skip
-    const svc = EmbeddingService.fromConfig(cfg);
-    if (!svc) return;
-    embedSvc = svc;
+    embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
   }
 
   // Locate specs directory
@@ -857,8 +873,9 @@ async function runSpecIndexing(
 
   try {
     const decisionsDir = pathJoin(rootPath, OPENSPEC_DIR, OPENSPEC_DECISIONS_SUBDIR);
-    const { recordCount } = await SpecVectorIndex.build(outputPath, specsDir, embedSvc, mappingJsonPath, decisionsDir);
-    console.log(`    ✓ Spec index built (${recordCount} sections)`);
+    const { recordCount, hasEmbeddings } = await SpecVectorIndex.build(outputPath, specsDir, embedSvc, mappingJsonPath, decisionsDir);
+    const specNote = hasEmbeddings ? '' : ' (keyword/BM25 — set EMBED_* for semantic spec search)';
+    console.log(`    ✓ Spec index built (${recordCount} sections)${specNote}`);
     console.log(`    → ${outputPath.replace(rootPath + '/', '')}vector-index/`);
   } catch (err) {
     console.log(`    ⚠ Spec index skipped: ${(err as Error).message}`);

@@ -132,3 +132,63 @@ src/cli/commands/mcp.e2e.integration.test.ts  # the 4 currently-failing tests mu
 ## When you are done
 
 Reply with: PR URL, summary, follow-ups, files changed. Nothing else.
+
+---
+
+## Completion log (2026-05-27)
+
+Status: **Phase 1 and Phase 2 both complete.** Branch `openlore-spec-06-bm25-index`.
+
+### Architectural decision (pinned)
+
+**The `vector-index-meta.json` sidecar is the single source of truth for whether ANN
+(dense) search is available** — not the presence of a `vector` column and not a try/catch.
+- A keyword-only index is written **without** a `vector` column and a sidecar with
+  `hasEmbeddings: false`. Search reads the sidecar (cached per `dbPath` alongside
+  `_bm25Cache`/`_tableCache`) and **forces BM25** when `hasEmbeddings === false`, even if an
+  `embedSvc` is supplied at query time — so the query is never embedded and ANN never runs
+  against a vector-less table.
+- A missing sidecar (legacy index built before this change) is treated as
+  `hasEmbeddings: true`, preserving pre-change behaviour for those indexes.
+- No placeholder/zero vectors are ever written. Downgrade (embedded → null rebuild) and
+  upgrade (null → embedded rebuild) are explicit overwrites that update the sidecar, and the
+  analyze output states which index was built.
+- The spec index uses the **same design** with its own sidecar `spec-index-meta.json`
+  (separate file so the function and spec tables can have independent embedding states).
+
+### What changed
+
+- `src/core/analyzer/embedding-service.ts` — added `get modelName()` (recorded in the sidecar).
+- `src/core/analyzer/vector-index.ts` — `build(embedSvc: … | null)`; BM25-only build path
+  (no `vector` column); meta sidecar read (cached) + write; `search()` honours the sidecar and
+  forces BM25 when `hasEmbeddings:false`; incremental vector reuse guarded on the existing
+  sidecar; deterministic BM25 tie-break by `id`; exported `tokenize`/`buildBm25Corpus`/`bm25Score`
+  for spec-index reuse; `build` returns `{ embedded, reused, total, hasEmbeddings }`.
+- `src/core/analyzer/spec-vector-index.ts` — Phase 2: `build`/`search` accept `embedSvc | null`;
+  BM25-only build + `_bm25Only` search; `spec-index-meta.json` sidecar.
+- `src/cli/commands/analyze.ts` — embedding resolution is best-effort (no abort); a configured-but-
+  failing embedder warns and falls back to BM25; new "Built keyword (BM25) search index" message;
+  spec indexing builds BM25-only when no embedder.
+- `src/core/services/mcp-watcher.ts` — passes `null` cleanly; refreshes the BM25 corpus in watch mode.
+- `src/core/services/mcp-handlers/orient.ts`, `semantic.ts` — "no index" hints now say plain
+  `openlore analyze` suffices; `search_code`/`suggest_insertion_points`/`search_specs` fall back to
+  BM25 (no error) when no embedder; `search_specs` reports `searchMode: bm25_fallback`.
+- `README.md` — "Known Limitations" reworded: plain `analyze` yields a working keyword index.
+- Tests: `vector-index.test.ts` (no-embedding build/search, spy-embedder-not-called, determinism,
+  dim, incremental, downgrade/upgrade); updated handler/watcher tests to the new fallback contract;
+  fixed a pre-existing stale assertion in `mcp.e2e.integration.test.ts` (`analyze_impact` now returns
+  `{ matches }` for FTS multi-match — unrelated to embeddings, failing on `main` too).
+
+### Verification
+
+`lint`, `typecheck`, `test:run` (2821 passed), `build`, and `test:integration` (110 passed, incl. the
+4 previously-failing orient/search_code cases) all green. `openlore analyze` with `EMBED_*` unset
+prints `✓ Built keyword (BM25) search index (N functions)` and writes
+`vector-index-meta.json` / `spec-index-meta.json` with `hasEmbeddings:false`.
+
+### Follow-ups (left as TODOs, out of scope here)
+
+- `TODO(spec-06-followup): exercise BM25 search path in CI` — integration tests are still excluded
+  from the CI Unit Tests job, which is how this bug originally shipped.
+- The `analyze_impact` FTS multi-match shape (`{ matches }`) vs. flat result is a separate
+  handler/test contract question worth revisiting.
