@@ -24,6 +24,9 @@
 | Handle provider limitations | ConfigurationVerificationReportsRealizedEffects | User-selected keyword-only is valid; configured but unrealized embeddings are disclosed without network/model downloads. |
 | Adapt to repository evolution | ConfigurationReassessmentFollowsRelevantRepositoryChanges | New workspace/build manifest invalidates only related rules; ordinary source edits invoke no LLM or full survey. |
 | Recover missed notifications | ConfigurationReassessmentFollowsRelevantRepositoryChanges | Stop host, change manifest, resume/review: evidence comparison invalidates the old recommendation. |
+| Prevent false alarms | ConfigurationNudgesRequireActionableMaterialEvidence | Dependency/format-only manifest edits, already-covered new components and uncertain surveys emit zero nudges. |
+| Distinguish persistent pressure | ConfigurationNudgesRequireActionableMaterialEvidence | A build spike that clears stays silent; a sustained, uncovered watched output with an available remedy produces one passive notice. |
+| Preserve dismissals and attention | ConfigurationNudgesRequireActionableMaterialEvidence | Harmless hashes/branch switches, concurrent sessions and expired snoozes do not produce duplicate or time-only notices. |
 | Keep worktrees independent | ConfigurationInspectionIsBoundedAndEvidenceBacked | Linked worktrees share Git ancestry but have distinct config plans, baselines, revisions and receipts. |
 | Preserve later edits on revert | ConfigurationRollbackPreservesLaterUserWork | Disjoint edits survive a patch inverse; overlapping edits produce conflict without a whole-file restore. |
 | Bootstrap without circular dependencies | ConfigurationManagementIsDaemonIndependentAndDependencyLight | Import graph/public API consumer tests reject eager analyzer/MCP/provider loading; inspection works with no structural service. |
@@ -41,6 +44,10 @@
 - Compare before/after corpus membership and a small set of known architectural queries. State which
   symbols/regions become unavailable; do not generalize sample checks into complete semantic coverage.
 - Verify event bursts, dismissals and unrelated HEAD changes do not create a configuration agent loop.
+- Replay representative repository evolution with positive cases and a larger quiet-control corpus;
+  metadata-only/no-impact controls must emit zero nudges. Record actionability, repeated delivery,
+  dismissals and user-rated false alarms. Agree precision/burden targets before broader opt-in rollout;
+  missed targets retain manual operation rather than weakening the evidence gate.
 - Measure inspection/import cost in extension-only hosts separately from optional verification work.
 
 ## Proposal review gates

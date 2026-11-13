@@ -30,7 +30,8 @@ watched, or embedded. The assistant must explain those tradeoffs and preserve de
 - Apply only authorized, still-current plans, preserve user choices and unknown config fields,
   verify realized behavior, and provide revision-checked rollback.
 - Detect meaningful repository evolution with deterministic, coalesced change signals. Notify
-  the host when a targeted reassessment is needed; never run an LLM on every file event.
+  the user only after proving an actionable material discrepancy not covered by existing choices;
+  metadata changes alone remain silent. Never run an LLM on every file event.
 - Keep recovery accessible through the host even when the structural index or daemon is broken.
   Respect external supervision and shared sessions rather than taking over their processes.
 

@@ -220,13 +220,63 @@ observed during an existing scan, and material growth/resource pressure reported
 A generic HEAD change is not a reason to crawl the repository or invoke a model.
 
 Coalesce signals and invalidate only recommendations whose evidence or selection scope changed.
-A new subproject prompts a bounded survey of that subtree; an unrelated code edit does not.
+A new subproject can justify a bounded survey of that subtree; it does not itself justify notifying
+the user. An unrelated code edit does not justify either operation.
 Growth thresholds require a recorded baseline, configured limits and a disclosed measurement;
 an incomplete survey cannot turn into an exact repository-wide growth claim.
 
 A missed event, host restart or branch switch is handled on the next explicit review or idle
 metadata check. Compare relevant evidence hashes before reuse, so notifications are not the only
-freshness guarantee. Debounce notifications and remember dismissals until their evidence changes.
+freshness guarantee. A changed evidence hash invalidates a cached assessment, not a dismissal and
+not the user's notification budget.
+
+### Notification gate: prove an actionable difference, otherwise stay silent
+
+False alarms are a product failure: a noisy assistant can make configuration less reliable by
+teaching users to ignore it. Keep manual review as the default; notification mode remains opt-in.
+Detection and user notification are distinct stages. A manifest edit, new language, new directory,
+HEAD change or elapsed time is only a candidate signal.
+
+Before a nudge, a bounded deterministic assessment must establish all of the following:
+
+1. A material discrepancy between the current effective policy and observed repository/runtime
+   behavior, attributable to an affected scope. Examples: a declared output subtree is actually
+   being watched, or measured resource pressure persists outside known rebuild activity.
+2. Existing explicit rules do not already cover the situation, and no active authorized operation
+   is already handling it. A deliberately excluded component is not an accidental coverage gap.
+3. There is an available, scoped review or remedy the host can offer now, and the evidence can
+   explain why it matters. A model's confidence score or a directory name is not sufficient proof.
+4. The same unresolved condition has not already been shown, dismissed or snoozed, and the host's
+   project-level delivery budget permits a non-interrupting notice.
+
+If evidence is partial, unavailable, unsupported or ambiguous, retain it in the explicit diagnostic
+report and stay silent. Do not turn the inability to assess configuration into a configuration
+alarm. Independently observed failures such as a real watcher error can use their existing error
+reporting path; the assistant must not duplicate or amplify that notification.
+
+For growth/resource signals, require persistence across bounded observations, a meaningful baseline
+and hysteresis between entering and clearing a condition. Suppress known transient build/rebuild
+activity. Exact thresholds, cooldowns and observation counts need measurement before shipping;
+test their boundary behavior rather than inventing a universal confidence percentage.
+
+Identify a notice by canonical worktree, condition kind and materially affected scope/effect, not
+commit id or raw evidence digest. Harmless dependency bumps, formatting, repeated branch switches
+or edits to the same manifest must not resurface a dismissed condition. A dismissal remains valid
+until the user resets it or a materially different actionable condition is proven. Snooze also
+requires fresh qualifying evidence when its deadline expires; time alone never emits a reminder.
+
+Batch notices into one passive host-owned status item, delivered when the user is idle or next
+opens that project's configuration/status view. No modal, blocked turn, repeated toast or notice
+per file/session. Where a host coordinates multiple sessions, it owns project-level deduplication;
+where that cannot be guaranteed, avoid autonomous duplicate delivery and keep the report on demand.
+Show the observed problem, its practical impact, the evidence and one review action. Report a
+coverage opportunity as a suggestion, never as a verified runtime failure.
+
+Before enabling notification mode beyond explicit trials, measure actionable notices, dismissals,
+repeated notices and user-rated false alarms on representative repository evolution histories.
+Pair positive fixtures with a larger quiet-control corpus. A metadata-only/no-impact control must
+emit zero nudges. If the detector cannot meet the agreed precision and burden targets, keep it
+manual; lowering the evidence gate to increase adoption is not an acceptable fallback.
 
 Generated baselines and operation receipts are private, bounded runtime state keyed by canonical
 worktree identity; they are not trust-bearing files to commit. Acceptance reasons remain in the

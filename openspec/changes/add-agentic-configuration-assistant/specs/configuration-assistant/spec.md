@@ -124,7 +124,8 @@ LLM, full repository survey or configuration application.
 #### Scenario: A workspace gains a new build system
 - **GIVEN** a previously accepted policy and a new subproject manifest declaring different outputs
 - **WHEN** a relevant signal or explicit review notices the change
-- **THEN** the assistant proposes a scoped reassessment and preserves unrelated user choices
+- **THEN** the assistant records a scoped reassessment candidate and preserves unrelated user choices
+- **AND** it notifies only if an actionable material discrepancy is proven, or responds to an explicit review
 
 #### Scenario: Ordinary source edits do not launch configuration work
 - **GIVEN** unchanged configuration evidence and routine edits to existing source
@@ -135,6 +136,55 @@ LLM, full repository survey or configuration application.
 - **GIVEN** a manifest changed while the host was stopped
 - **WHEN** the assistant next reviews a plan or baseline using that manifest
 - **THEN** its evidence revision is rechecked and the affected recommendation is marked for reassessment
+
+### Requirement: ConfigurationNudgesRequireActionableMaterialEvidence
+
+Automatic nudges SHALL require a proven material policy/runtime discrepancy, an available scoped
+action and no covering explicit choice or operation. Metadata changes alone SHALL NOT notify.
+Uncertain assessments SHALL stay in on-demand reports. Delivery SHALL be passive, grouped and
+deduplicated by unresolved condition; harmless evidence changes SHALL NOT reset dismissals.
+Resource signals SHALL require persistence and hysteresis. Notification mode SHALL remain opt-in.
+
+#### Scenario: A manifest changes without changing effective behavior
+- **GIVEN** a dependency bump or formatting edit that leaves effective selection and runtime behavior unchanged
+- **WHEN** the metadata signal is assessed
+- **THEN** no nudge is emitted
+
+#### Scenario: A new component is already covered by existing policy
+- **GIVEN** a new workspace member whose source and outputs are correctly handled by existing explicit rules
+- **WHEN** the component is detected
+- **THEN** the existing coverage is recognized and the user is not asked to review it again
+
+#### Scenario: A bounded survey cannot establish an impact
+- **GIVEN** incomplete or ambiguous evidence about a possible new build output
+- **WHEN** the notification gate runs
+- **THEN** the uncertainty remains available in diagnostics without a user-facing alarm
+
+#### Scenario: Resource pressure clears after a build
+- **GIVEN** a short-lived resource spike during known build or rebuild activity
+- **WHEN** subsequent bounded observations return below the clearing threshold
+- **THEN** no configuration nudge is emitted for that transient spike
+
+#### Scenario: A proven uncovered output tree has an available remedy
+- **GIVEN** a declared build output is observed consuming watches outside existing exclusions
+- **AND** no authorized operation already addresses it and notification mode is enabled
+- **WHEN** the material-impact and delivery gates pass
+- **THEN** one passive notice explains the observed impact and offers a scoped configuration review
+
+#### Scenario: A dismissed issue receives a harmless new evidence revision
+- **GIVEN** the user dismissed an unresolved condition for a particular scope and effect
+- **WHEN** a manifest hash or branch changes without materially changing that condition
+- **THEN** the dismissal remains effective and no duplicate notice is delivered
+
+#### Scenario: Several sessions observe the same condition
+- **GIVEN** multiple sessions share a host and project with one unresolved configuration discrepancy
+- **WHEN** their signals are coalesced
+- **THEN** the host offers at most one passive grouped notice rather than one per event or session
+
+#### Scenario: A snooze expires without a current problem
+- **GIVEN** a snoozed condition whose qualifying discrepancy no longer exists
+- **WHEN** the snooze deadline expires
+- **THEN** fresh assessment clears the condition and no time-only reminder is sent
 
 ### Requirement: ConfigurationRollbackPreservesLaterUserWork
 

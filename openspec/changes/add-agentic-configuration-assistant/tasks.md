@@ -61,6 +61,11 @@
 - [ ] 7.3 Target reassessment to affected rules/subtrees, retain user choices, and surface hypotheses needing a decision.
 - [ ] 7.4 Revalidate after missed events, branch changes and host restarts; deduplicate notifications by evidence revision.
 - [ ] 7.5 Implement manual review by default and opt-in notifications without automatic policy application.
+- [ ] 7.6 Separate candidate signals from the notification gate: require material evidence, an uncovered discrepancy and an available scoped action; stay silent on uncertainty.
+- [ ] 7.7 Add transient suppression, persistence and hysteresis for resource signals; measure thresholds and delivery budgets before shipping.
+- [ ] 7.8 Deduplicate by unresolved semantic condition across harmless evidence revisions and host sessions; preserve dismissals and recheck snoozed conditions before delivery.
+- [ ] 7.9 Deliver one passive, grouped notice at a host-appropriate idle/status point; avoid modals, repeated toasts and duplicate runtime-error reporting.
+- [ ] 7.10 Validate precision and notification burden on positive fixtures and a larger quiet-control corpus; do not broaden notification rollout if the agreed targets are missed.
 
 ## 8. Release verification and documentation
 
